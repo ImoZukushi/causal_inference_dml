@@ -5,7 +5,7 @@ NN（`mlp` / `cnn1d`）は任意依存のtorch・skorchがインストールさ�
 （`uv sync --extra nn`）。
 """
 
-from modeling.models import gbdt, linear
+from modeling.models import forest, gbdt, linear
 from modeling.models.base import ModelSpec, available_models, get_model_spec, register_model
 
 try:
@@ -17,6 +17,7 @@ except ImportError:
 __all__ = [
     "ModelSpec",
     "available_models",
+    "forest",
     "gbdt",
     "get_model_spec",
     "linear",

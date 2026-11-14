@@ -1,15 +1,22 @@
-"""勾配ブースティング決定木（LightGBM・XGBoost）。"""
+"""勾配ブースティング決定木（LightGBM・XGBoost・CatBoost）。"""
 
 from __future__ import annotations
 
 from typing import Any
 
+import catboost as cb
 import lightgbm as lgb
 import xgboost as xgb
 from sklearn.base import BaseEstimator
 
 from evaluation.curves import TrainingHistory
-from modeling.models.base import ModelSpec, merge_params, register_model
+from modeling.models.base import (
+    ModelSpec,
+    check_objective,
+    merge_params,
+    objective_alpha,
+    register_model,
+)
 from modeling.tasks import Task, is_classification
 
 _ALL_TASKS = frozenset(Task)
@@ -104,6 +111,14 @@ class LightGBMSpec(ModelSpec):
         """木の本数を固定したパラメータを返す。"""
         return {**params, "n_estimators": n_iterations}
 
+    def objective_params(self, objective: str, alpha: float | None = None) -> dict[str, Any]:
+        """目的関数を LightGBM の `objective`（huber・quantile は `alpha` も）に変換する。"""
+        check_objective(objective)
+        names = {"l2": "regression", "l1": "regression_l1", "poisson": "poisson"}
+        if objective in names:
+            return {"objective": names[objective]}
+        return {"objective": objective, "alpha": objective_alpha(objective, alpha)}
+
 
 @register_model
 class XGBoostSpec(ModelSpec):
@@ -195,3 +210,138 @@ class XGBoostSpec(ModelSpec):
     def with_n_iterations(self, params: dict[str, Any], n_iterations: int) -> dict[str, Any]:
         """木の本数を固定したパラメータを返す。"""
         return {**params, "n_estimators": n_iterations}
+
+    def objective_params(self, objective: str, alpha: float | None = None) -> dict[str, Any]:
+        """目的関数を XGBoost の `objective` に変換する。
+
+        huber は `huber_slope`、quantile は `quantile_alpha` に `alpha` を渡す。
+        XGBoost の huber は擬似Huber損失（Huber損失の滑らかな近似）。
+        """
+        check_objective(objective)
+        names = {"l2": "reg:squarederror", "l1": "reg:absoluteerror", "poisson": "count:poisson"}
+        if objective in names:
+            return {"objective": names[objective]}
+        value = objective_alpha(objective, alpha)
+        if objective == "huber":
+            return {"objective": "reg:pseudohubererror", "huber_slope": value}
+        return {"objective": "reg:quantileerror", "quantile_alpha": value}
+
+
+@register_model
+class CatBoostSpec(ModelSpec):
+    """CatBoost（`CatBoostRegressor` / `CatBoostClassifier`）。
+
+    木の本数は `iterations`（`n_estimators` を渡した場合は `iterations` に読み替える）。
+    学習データの損失は、評価セットに加えなくても毎反復記録される。
+    """
+
+    name = "catboost"
+    supported_tasks = _ALL_TASKS
+    explainer_kind = "tree"
+
+    def build(
+        self,
+        task: Task,
+        params: dict[str, Any],
+        seed: int,
+        early_stopping_rounds: int | None = None,
+    ) -> BaseEstimator:
+        """CatBoostのestimatorを作る（early stoppingは `fit_kwargs` で指定）。"""
+        params = dict(params)
+        # 同じ意味の別名を両方渡すとエラーになるため、他のモデルと共通の名前を読み替える
+        n_estimators = params.pop("n_estimators", None)
+        if n_estimators is not None:
+            params.setdefault("iterations", n_estimators)
+        defaults: dict[str, Any] = {
+            "verbose": False,
+            # 学習ログのディレクトリ（catboost_info/）を作らない
+            "allow_writing_files": False,
+        }
+        if "random_state" not in params:
+            defaults["random_seed"] = seed
+        merged = merge_params(defaults, params)
+        if is_classification(task):
+            return cb.CatBoostClassifier(**merged)
+        return cb.CatBoostRegressor(**merged)
+
+    def search_space(self, trial: Any, task: Task) -> dict[str, Any]:
+        """CatBoostの代表的なパラメータの探索空間。
+
+        深さの上限は8にする（CatBoost の木は左右対称で葉が 2^深さ 個になり、深さ10では
+        1万行・1000本の学習に1 fold あたり数分かかるため）。
+        """
+        return {
+            "learning_rate": trial.suggest_float("learning_rate", 1e-3, 0.3, log=True),
+            "depth": trial.suggest_int("depth", 4, 8),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 30.0, log=True),
+            "random_strength": trial.suggest_float("random_strength", 1e-3, 10.0, log=True),
+            "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
+        }
+
+    def fit_kwargs(
+        self,
+        X_valid: Any,
+        y_valid: Any,
+        early_stopping_rounds: int | None,
+        *,
+        X_train: Any = None,
+        y_train: Any = None,
+        record_history: bool = False,
+    ) -> dict[str, Any]:
+        """early stopping・学習の推移の記録用に、検証データを評価セットとして渡す。
+
+        CatBoost は評価セットを渡すと、既定で最良の反復まで木を切り詰める（`use_best_model`）。
+        early stopping しない場合は明示的に無効にし、学習の推移を記録するだけで
+        結果が変わらないようにする。
+        """
+        if X_valid is None or (early_stopping_rounds is None and not record_history):
+            return {}
+        kwargs: dict[str, Any] = {"eval_set": [(X_valid, y_valid)], "use_best_model": False}
+        if early_stopping_rounds is not None:
+            kwargs.update(early_stopping_rounds=early_stopping_rounds, use_best_model=True)
+        return kwargs
+
+    def training_history(self, estimator: Any) -> TrainingHistory | None:
+        """`get_evals_result()` から学習（`learn`）・検証（それ以外）の損失を取り出す。"""
+        try:
+            results = estimator.get_evals_result()
+        except cb.CatBoostError:
+            return None
+        if not results:
+            return None
+        train = results.get("learn")
+        valid = next((v for k, v in results.items() if k != "learn"), None)
+        metric = next(iter((train or valid or {}).keys()), "loss")
+        return TrainingHistory(
+            metric=metric,
+            train=list(train[metric]) if train and metric in train else None,
+            valid=list(valid[metric]) if valid and metric in valid else None,
+            best_iteration=self.best_iteration(estimator),
+        )
+
+    def best_iteration(self, estimator: Any) -> int | None:
+        """early stoppingで決まった最良イテレーション数（0始まりのため+1する）。"""
+        try:
+            best = estimator.get_best_iteration()
+        except cb.CatBoostError:
+            return None
+        return int(best) + 1 if best is not None else None
+
+    def with_n_iterations(self, params: dict[str, Any], n_iterations: int) -> dict[str, Any]:
+        """木の本数を固定したパラメータを返す（`n_estimators` は `iterations` に読み替える）。"""
+        rest = {k: v for k, v in params.items() if k != "n_estimators"}
+        return {**rest, "iterations": n_iterations}
+
+    def objective_params(self, objective: str, alpha: float | None = None) -> dict[str, Any]:
+        """目的関数を CatBoost の `loss_function` に変換する。
+
+        huber は `delta`、quantile は `alpha` として損失の名前に埋め込む。
+        """
+        check_objective(objective)
+        names = {"l2": "RMSE", "l1": "MAE", "poisson": "Poisson"}
+        if objective in names:
+            return {"loss_function": names[objective]}
+        value = objective_alpha(objective, alpha)
+        if objective == "huber":
+            return {"loss_function": f"Huber:delta={value}"}
+        return {"loss_function": f"Quantile:alpha={value}"}

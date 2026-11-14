@@ -4,7 +4,8 @@ CVの各foldモデルを、そのfoldの**検証データ**に対して説明し
 「OOF SHAP」を作る。学習に使ったデータで説明すると過学習した関係まで重要に見えるため、
 予測性能の評価（OOF）と同じ考え方で解釈にも未学習データを使う。
 
-- 木モデル（`ModelSpec.explainer_kind == "tree"`）: `shap.TreeExplainer`（高速・厳密）
+- 木モデル（`ModelSpec.explainer_kind == "tree"`）: `shap.TreeExplainer`（高速・厳密）。
+  TreeExplainer がモデルに対応しない場合は、警告を出して permutation 法に切り替える
 - それ以外: `shap.Explainer` のpermutation法（モデル非依存。予測関数だけを使う）
 
 SHAP値のスケールは、木モデルではモデルの生出力（回帰は予測値、分類はlog-odds）、
@@ -13,6 +14,7 @@ permutation法では `modeling.tasks.predict` の出力（分類は確率）に�
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,8 @@ from modeling.pipeline import MODEL_STEP
 from modeling.tasks import Task, predict
 from modeling.trainer import CVResult
 from util.plotting import add_caption, ensure_japanese_font
+
+logger = logging.getLogger(__name__)
 
 # permutation法で背景分布に使うサンプル数
 _BACKGROUND_SIZE = 100
@@ -147,14 +151,49 @@ def compute_oof_shap(
         folds: `run_cv` に渡したCV分割。
         cv_result: `run_cv` の結果（foldモデルを含む）。
         n_classes: 多クラス分類のクラス数。
-        max_samples: 計算に使う最大行数（Noneなら `config.explain.max_samples`）。
+        max_samples: 計算に使う最大行数（Noneなら `config.explain.max_samples`。
+            モデルに `ModelSpec.shap_max_samples` があれば、それ以下に抑える）。
 
     Returns:
         OOF SHAPの計算結果。
     """
-    kind = get_model_spec(config.model.name).explainer_kind
+    spec = get_model_spec(config.model.name)
+    kind = spec.explainer_kind
     limit = config.explain.max_samples if max_samples is None else max_samples
+    if max_samples is None and spec.shap_max_samples is not None and limit > spec.shap_max_samples:
+        # 1行あたりの計算が重いモデルは、引数で明示されない限り行数を抑える
+        logger.info(
+            "%s は SHAP の計算が重いため、%d 行に抑えます（設定は %d 行）",
+            spec.name,
+            spec.shap_max_samples,
+            limit,
+        )
+        limit = spec.shap_max_samples
     rows = sample_oof_rows(cv_result.fold_ids, limit, config.seed)
+    if kind == "tree":
+        try:
+            return _compute_oof_shap(config, X, folds, cv_result, n_classes, rows, "tree")
+        except Exception as e:
+            # TreeExplainer はモデルの版や設定によって対応しないことがある（例外の型も様々）。
+            # fold ごとにスケールが混ざらないよう、全 fold を permutation 法で計算し直す
+            logger.warning(
+                "TreeExplainer が使えないため permutation 法に切り替えます（%s: %s）",
+                type(e).__name__,
+                e,
+            )
+    return _compute_oof_shap(config, X, folds, cv_result, n_classes, rows, "permutation")
+
+
+def _compute_oof_shap(
+    config: ExperimentConfig,
+    X: pd.DataFrame,
+    folds: Sequence[Fold],
+    cv_result: CVResult,
+    n_classes: int | None,
+    rows: np.ndarray,
+    kind: str,
+) -> ShapResult:
+    """指定した種類の explainer で OOF SHAP を計算する（`compute_oof_shap` の本体）。"""
     values_list: list[np.ndarray] = []
     base_list: list[np.ndarray] = []
     data_list: list[pd.DataFrame] = []

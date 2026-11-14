@@ -51,9 +51,13 @@ def _config(
     return ExperimentConfig.model_validate(raw | overrides)
 
 
+# 木のモデル（early stopping のある GBDT と、ランダムフォレスト系）
+TREE_MODELS = ["lightgbm", "xgboost", "catboost", "random_forest", "extra_trees"]
+
+
 def _small_params(model: str) -> dict[str, Any]:
     # テストを高速にするため木の本数を減らす
-    return {"n_estimators": 30} if model in ("lightgbm", "xgboost") else {}
+    return {} if model in ("dummy", "linear") else {"n_estimators": 30}
 
 
 # --- pipeline -----------------------------------------------------------------
@@ -96,7 +100,7 @@ def test_build_pipeline_structure() -> None:
 
 
 def test_model_registry_contains_builtin_models() -> None:
-    assert {"dummy", "linear", "lightgbm", "xgboost"} <= set(available_models())
+    assert {"dummy", "linear", *TREE_MODELS} <= set(available_models())
     with pytest.raises(KeyError):
         get_model_spec("no_such_model")
 
@@ -104,7 +108,7 @@ def test_model_registry_contains_builtin_models() -> None:
 # --- trainer ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model", ["dummy", "linear", "lightgbm", "xgboost"])
+@pytest.mark.parametrize("model", ["dummy", "linear", *TREE_MODELS])
 @pytest.mark.parametrize("task", ["regression", "binary", "multiclass"])
 def test_run_cv_all_models_share_same_interface(
     synthetic_frame: pd.DataFrame, model: str, task: str
@@ -168,7 +172,7 @@ def test_run_cv_fits_preprocessing_on_train_fold_only(synthetic_frame: pd.DataFr
         assert seen.isdisjoint(ids[valid_idx].tolist())
 
 
-@pytest.mark.parametrize("model", ["lightgbm", "xgboost"])
+@pytest.mark.parametrize("model", ["lightgbm", "xgboost", "catboost"])
 def test_early_stopping_records_best_iteration(synthetic_frame: pd.DataFrame, model: str) -> None:
     cfg = _config(
         "regression",
@@ -212,11 +216,12 @@ def test_time_series_cv_leaves_initial_rows_unpredicted(synthetic_frame: pd.Data
     assert np.isfinite(result.oof_scores["rmse"])
 
 
-@pytest.mark.parametrize("model_name", ["lightgbm", "xgboost"])
+@pytest.mark.parametrize("model_name", TREE_MODELS)
 def test_fit_pipeline_uses_sample_weight(model_name: str) -> None:
     # 2つのグループで目的変数が違うデータ。片方に大きな重みを付けると、予測がそちらに寄る
     n = 200
-    X = pd.DataFrame({"x": np.zeros(n)})
+    # 特徴量はグループと無関係（CatBoost は定数の特徴量だけでは学習できないため 0・1 を交互に置く）
+    X = pd.DataFrame({"x": (np.arange(n) % 2).astype(float)})
     y = np.where(np.arange(n) < n // 2, 0.0, 10.0)
     config = ExperimentConfig.model_validate(
         {

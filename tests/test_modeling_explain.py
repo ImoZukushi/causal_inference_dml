@@ -52,7 +52,9 @@ def test_sample_oof_rows_limits_and_skips_unpredicted() -> None:
     assert sampled.tolist() == sorted(sampled.tolist())
 
 
-@pytest.mark.parametrize("model", ["lightgbm", "xgboost"])
+@pytest.mark.parametrize(
+    "model", ["lightgbm", "xgboost", "catboost", "random_forest", "extra_trees"]
+)
 def test_tree_shap_is_additive_for_regression(synthetic_frame: pd.DataFrame, model: str) -> None:
     ds, result = _run(synthetic_frame, _config("regression", model))
     shap_result = compute_oof_shap(_config("regression", model), ds.X, ds.folds, result)
@@ -60,6 +62,36 @@ def test_tree_shap_is_additive_for_regression(synthetic_frame: pd.DataFrame, mod
     assert shap_result.values.shape == (len(synthetic_frame), ds.X.shape[1])
     reconstructed = shap_result.values.sum(axis=1) + shap_result.base_values
     assert reconstructed == pytest.approx(result.oof_pred[shap_result.rows], abs=1e-4)
+
+
+def test_model_shap_max_samples_caps_rows(
+    synthetic_frame: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from modeling.models.forest import RandomForestSpec
+
+    cfg = _config("regression", "random_forest")
+    ds, result = _run(synthetic_frame, cfg)
+    monkeypatch.setattr(RandomForestSpec, "shap_max_samples", 10)
+    assert len(compute_oof_shap(cfg, ds.X, ds.folds, result).rows) == 10
+    # 引数で明示した行数は抑えない
+    explicit = compute_oof_shap(cfg, ds.X, ds.folds, result, max_samples=20)
+    assert len(explicit.rows) == 20
+
+
+def test_tree_shap_falls_back_to_permutation(
+    synthetic_frame: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import modeling.explain as explain
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("unsupported model")
+
+    cfg = _config("regression", "lightgbm")
+    ds, result = _run(synthetic_frame, cfg)
+    monkeypatch.setattr(explain, "_explain_tree", broken)
+    shap_result = compute_oof_shap(cfg, ds.X, ds.folds, result, max_samples=15)
+    assert shap_result.explainer_kind == "permutation"
+    assert shap_result.values.shape == (15, ds.X.shape[1])
 
 
 def test_tree_shap_binary_is_in_log_odds(synthetic_frame: pd.DataFrame) -> None:

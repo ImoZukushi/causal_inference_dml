@@ -21,7 +21,7 @@ MODEL_STEP = "model"
 
 
 class ToModelInput(BaseEstimator, TransformerMixin):
-    """DataFrameをモデル入力用に整える（列の型の確認と、列順の固定）。
+    """DataFrameをモデル入力用に整える（列の型の確認と、列順の固定、±inf を NaN にする）。
 
     数値型（整数・浮動小数・真偽値）以外の列が残っている場合は、どの列を
     エンコードすべきかが分かるよう列名を列挙してエラーにする
@@ -65,6 +65,11 @@ class ToModelInput(BaseEstimator, TransformerMixin):
         ]
         if nullable:
             frame = frame.astype(dict.fromkeys(nullable, "float64"))
+        # ±inf は欠損（NaN）にする。受け付けないモデル（scikit-learn の木・CatBoost）があるため、
+        # どのモデルにも同じ入力を渡すよう全モデルで行う
+        floats = [c for c in frame.columns if pd.api.types.is_float_dtype(frame[c])]
+        if floats and np.isinf(frame[floats].to_numpy()).any():
+            frame = frame.assign(**{c: frame[c].replace([np.inf, -np.inf], np.nan) for c in floats})
         if self.dtype is not None:
             frame = frame.astype(self.dtype)  # type: ignore[arg-type]
         return frame

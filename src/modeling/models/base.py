@@ -18,6 +18,14 @@ from modeling.tasks import Task
 
 ExplainerKind = Literal["tree", "linear", "permutation"]
 
+# 回帰の目的関数（損失）の共通の名前。各モデルの指定への変換は `ModelSpec.objective_params` で行う
+#   l2: 二乗誤差 / l1: 絶対誤差 / huber: Huber損失 / quantile: 分位点損失 / poisson: ポアソン損失
+OBJECTIVES: tuple[str, ...] = ("l2", "l1", "huber", "quantile", "poisson")
+
+# `alpha` を省略したときの既定値。モデルごとの既定（LightGBM は huber・quantile とも 0.9 など）が
+# ばらばらなので、モデルを替えても同じ損失になるよう共通の値にそろえる
+DEFAULT_OBJECTIVE_ALPHA: dict[str, float] = {"huber": 1.0, "quantile": 0.5}
+
 
 class ModelSpec(ABC):
     """モデル1種類分の定義。
@@ -27,12 +35,15 @@ class ModelSpec(ABC):
         supported_tasks: 対応するタスク。
         explainer_kind: SHAPで使うexplainerの種類。
         requires_float32: 入力特徴量をfloat32に変換する必要があるか（PyTorch系）。
+        shap_max_samples: SHAPを計算する行数の上限（Noneなら設定の `explain.max_samples` のまま）。
+            1行あたりの計算が重いモデル（深い木を多数持つランダムフォレスト系）で使う。
     """
 
     name: ClassVar[str]
     supported_tasks: ClassVar[frozenset[Task]]
     explainer_kind: ClassVar[ExplainerKind] = "permutation"
     requires_float32: ClassVar[bool] = False
+    shap_max_samples: ClassVar[int | None] = None
 
     @abstractmethod
     def build(
@@ -109,9 +120,55 @@ class ModelSpec(ABC):
         """
         return params
 
+    def objective_params(self, objective: str, alpha: float | None = None) -> dict[str, Any]:
+        """共通の名前（`OBJECTIVES`）の目的関数を、このモデルのパラメータに変換する（回帰用）。
+
+        Args:
+            objective: 目的関数の共通の名前（`l2`・`l1`・`huber`・`quantile`・`poisson`）。
+            alpha: huber の閾値（誤差がこれを超えると絶対誤差になる）・quantile の分位
+                （Noneなら `DEFAULT_OBJECTIVE_ALPHA`）。l2・l1・poisson では使わない。
+
+        Returns:
+            モデルのパラメータに加える dict。
+
+        Raises:
+            ValueError: 未知の名前、またはこのモデルが対応しない目的関数の場合。
+        """
+        check_objective(objective)
+        raise unsupported_objective(self, objective)
+
     def supports(self, task: Task) -> bool:
         """タスクに対応しているかを返す。"""
         return task in self.supported_tasks
+
+
+def check_objective(objective: str) -> None:
+    """目的関数の共通の名前が `OBJECTIVES` にあるかを確かめる。
+
+    Raises:
+        ValueError: 未知の名前の場合。
+    """
+    if objective not in OBJECTIVES:
+        raise ValueError(f"未知の目的関数です: {objective}（利用可能: {list(OBJECTIVES)}）")
+
+
+def objective_alpha(objective: str, alpha: float | None) -> float:
+    """huber・quantile の `alpha`（省略時は `DEFAULT_OBJECTIVE_ALPHA`）を返す。
+
+    Raises:
+        ValueError: quantile の分位が (0, 1) の外、または huber の閾値が正でない場合。
+    """
+    value = DEFAULT_OBJECTIVE_ALPHA[objective] if alpha is None else float(alpha)
+    if objective == "quantile" and not 0 < value < 1:
+        raise ValueError(f"quantile の分位は 0 < alpha < 1 で指定してください: {value}")
+    if objective == "huber" and value <= 0:
+        raise ValueError(f"huber の閾値は正の値で指定してください: {value}")
+    return value
+
+
+def unsupported_objective(spec: ModelSpec, objective: str) -> ValueError:
+    """このモデルが対応しない目的関数を指定されたときの例外を作る。"""
+    return ValueError(f"{spec.name} は目的関数 {objective} に対応していません")
 
 
 _REGISTRY: dict[str, ModelSpec] = {}
