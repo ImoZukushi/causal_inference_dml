@@ -121,7 +121,7 @@ def test_objective_params_rejects_invalid_input(objective: str, alpha: float | N
 
 def test_models_without_mapping_reject_objectives() -> None:
     with pytest.raises(ValueError, match="対応していません"):
-        get_model_spec("linear").objective_params("l2")
+        get_model_spec("dummy").objective_params("l2")
 
 
 @pytest.mark.parametrize("model", TREE_MODELS)

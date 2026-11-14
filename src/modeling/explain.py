@@ -6,9 +6,11 @@ CVの各foldモデルを、そのfoldの**検証データ**に対して説明し
 
 - 木モデル（`ModelSpec.explainer_kind == "tree"`）: `shap.TreeExplainer`（高速・厳密）。
   TreeExplainer がモデルに対応しない場合は、警告を出して permutation 法に切り替える
+- 線形モデル（`explainer_kind == "linear"`）: 係数から厳密に計算する（`_explain_linear`）。
+  計算できない場合は、警告を出して permutation 法に切り替える
 - それ以外: `shap.Explainer` のpermutation法（モデル非依存。予測関数だけを使う）
 
-SHAP値のスケールは、木モデルではモデルの生出力（回帰は予測値、分類はlog-odds）、
+SHAP値のスケールは、木モデル・線形モデルではモデルの生出力（回帰は予測値、分類はlog-odds）、
 permutation法では `modeling.tasks.predict` の出力（分類は確率）になる。
 """
 
@@ -110,6 +112,53 @@ def _explain_tree(model: Any, X: pd.DataFrame, task: Task) -> tuple[np.ndarray, 
     return values, np.broadcast_to(base, values.shape[:1] + values.shape[2:]).copy()
 
 
+def _explain_linear(
+    model: Any, X: pd.DataFrame, background: pd.DataFrame
+) -> tuple[np.ndarray, np.ndarray]:
+    """線形モデルの SHAP 値を係数から厳密に計算する。
+
+    モデルは「列ごとの前処理（欠損値補完・標準化など）→ 係数 `coef_`・切片 `intercept_` を
+    持つ線形モデル」の Pipeline、または線形モデルそのもの。予測が `z @ coef + intercept`
+    （`z` は前処理後の値）なので、特徴量どうしを独立とみなした SHAP 値は
+    `coef_j * (z_j - 背景での z_j の平均)`、期待値は背景での予測の平均になる。
+    前処理が列ごとでない（列を足す・混ぜる）場合は、元の列に対応しないため使えない。
+
+    Args:
+        model: 学習済みのモデル。
+        X: 説明する行（モデルの入力）。
+        background: 期待値の基準にする行（モデルの入力）。
+
+    Returns:
+        (SHAP値, 期待値)。回帰・二値は (n, 特徴量数) と (n,)、多クラスは
+        (n, 特徴量数, クラス数) と (n, クラス数)。
+
+    Raises:
+        ValueError: 前処理で列の数が変わる場合や、係数の形が特徴量の数と合わない場合。
+    """
+    if hasattr(model, "steps"):
+        preprocess, estimator = model[:-1], model[-1]
+        z = np.asarray(preprocess.transform(X), dtype=np.float64)
+        z_bg = np.asarray(preprocess.transform(background), dtype=np.float64)
+    else:
+        estimator = model
+        z = X.to_numpy(dtype=np.float64)
+        z_bg = background.to_numpy(dtype=np.float64)
+    coef = np.atleast_2d(np.asarray(estimator.coef_, dtype=np.float64))  # (出力数, 特徴量数)
+    intercept = np.atleast_1d(np.asarray(estimator.intercept_, dtype=np.float64))
+    if z.shape[1] != X.shape[1] or coef.shape[1] != X.shape[1]:
+        raise ValueError(
+            f"前処理後の列数（{z.shape[1]}）・係数の数（{coef.shape[1]}）が"
+            f"特徴量の数（{X.shape[1]}）と合いません"
+        )
+    mean = z_bg.mean(axis=0)
+    values = (z - mean)[:, :, None] * coef.T[None, :, :]
+    base = np.broadcast_to(intercept + coef @ mean, (len(X), coef.shape[0])).copy()
+    if coef.shape[0] == 1:
+        # 回帰・二値分類は出力が1つ
+        return values[:, :, 0], base[:, 0]
+    return values, base
+
+
 def _explain_permutation(
     model: Any,
     X: pd.DataFrame,
@@ -170,14 +219,16 @@ def compute_oof_shap(
         )
         limit = spec.shap_max_samples
     rows = sample_oof_rows(cv_result.fold_ids, limit, config.seed)
-    if kind == "tree":
+    if kind in ("tree", "linear"):
         try:
-            return _compute_oof_shap(config, X, folds, cv_result, n_classes, rows, "tree")
+            return _compute_oof_shap(config, X, folds, cv_result, n_classes, rows, kind)
         except Exception as e:
             # TreeExplainer はモデルの版や設定によって対応しないことがある（例外の型も様々）。
+            # 線形の計算も、係数を持たないモデルでは使えない。
             # fold ごとにスケールが混ざらないよう、全 fold を permutation 法で計算し直す
             logger.warning(
-                "TreeExplainer が使えないため permutation 法に切り替えます（%s: %s）",
+                "%s の SHAP が計算できないため permutation 法に切り替えます（%s: %s）",
+                kind,
                 type(e).__name__,
                 e,
             )
@@ -207,6 +258,9 @@ def _compute_oof_shap(
         Xt = preprocess.transform(X.iloc[fold_rows])
         if kind == "tree":
             values, base = _explain_tree(model, Xt, config.task)
+        elif kind == "linear":
+            # 基準（期待値）は、そのfoldの学習データ全体の平均（モデルが見た分布）
+            values, base = _explain_linear(model, Xt, preprocess.transform(X.iloc[train_idx]))
         else:
             # 背景分布はそのfoldの学習データから抽出する（モデルが見た分布を基準にする）
             n_bg = min(len(train_idx), _BACKGROUND_SIZE * 10)

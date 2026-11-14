@@ -17,6 +17,7 @@ from evaluation.curves import TrainingHistory
 from modeling.tasks import Task
 
 ExplainerKind = Literal["tree", "linear", "permutation"]
+CategoricalEncoding = Literal["ordinal", "onehot"]
 
 # 回帰の目的関数（損失）の共通の名前。各モデルの指定への変換は `ModelSpec.objective_params` で行う
 #   l2: 二乗誤差 / l1: 絶対誤差 / huber: Huber損失 / quantile: 分位点損失 / poisson: ポアソン損失
@@ -37,6 +38,9 @@ class ModelSpec(ABC):
         requires_float32: 入力特徴量をfloat32に変換する必要があるか（PyTorch系）。
         shap_max_samples: SHAPを計算する行数の上限（Noneなら設定の `explain.max_samples` のまま）。
             1行あたりの計算が重いモデル（深い木を多数持つランダムフォレスト系）で使う。
+        categorical_encoding: カテゴリ列の推奨のエンコーディング。`"ordinal"`（整数化。木のモデル
+            向き）か `"onehot"`（ワンホット。整数の大小に意味を持たせない線形モデル向き）。
+            設定ファイル・ノートブックが特徴量の前処理を選ぶときの目安で、モデル自体は使わない。
     """
 
     name: ClassVar[str]
@@ -44,6 +48,7 @@ class ModelSpec(ABC):
     explainer_kind: ClassVar[ExplainerKind] = "permutation"
     requires_float32: ClassVar[bool] = False
     shap_max_samples: ClassVar[int | None] = None
+    categorical_encoding: ClassVar[CategoricalEncoding] = "ordinal"
 
     @abstractmethod
     def build(
@@ -79,6 +84,14 @@ class ModelSpec(ABC):
             NotImplementedError: 既定探索空間を持たないモデルの場合。
         """
         raise NotImplementedError(f"{self.name} には既定の探索空間がありません")
+
+    @property
+    def has_search_space(self) -> bool:
+        """既定の探索空間を持つか（`search_space` を実装しているか）。
+
+        ハイパーパラメータの無いモデル（OLS・定数予測）は False。Optuna で探す前の確認に使う。
+        """
+        return type(self).search_space is not ModelSpec.search_space
 
     def fit_kwargs(
         self,
