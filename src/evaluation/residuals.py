@@ -260,11 +260,15 @@ class ResidualCorrelogramDisplay:
     def from_residuals(
         cls, residuals: Mapping[str, Any] | Any, *, nlags: int = 40, ax: Any = None
     ) -> Self:
-        """時刻順の残差（系列名 → 残差、または1系列の残差）から計算して描く。"""
+        """時刻順の残差（系列名 → 残差、または1系列の残差）から計算して描く。
+
+        非有限（NaN・±inf）の残差は除き、残りを詰めて計算する。
+        """
         series = residuals if isinstance(residuals, Mapping) else {"残差": residuals}
         acf, pacf, n_obs = {}, {}, {}
         for name, values in series.items():
-            s = pd.Series(np.asarray(values, dtype=np.float64)).dropna()
+            arr = np.asarray(values, dtype=np.float64)
+            s = pd.Series(arr[np.isfinite(arr)])
             acf[str(name)] = compute_acf(s, nlags=nlags)
             pacf[str(name)] = compute_pacf(s, nlags=nlags)
             n_obs[str(name)] = len(s)

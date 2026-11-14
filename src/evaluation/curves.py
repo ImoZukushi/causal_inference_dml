@@ -203,6 +203,17 @@ class TrainingHistory:
     best_iteration: int | None = None
 
 
+def _finite_or_none(values: Sequence[float] | None) -> np.ndarray | None:
+    """損失の列の非有限値を NaN にして返す（None、または全てが非有限なら None）。"""
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if not finite.any():
+        return None
+    return np.where(finite, arr, np.nan)
+
+
 class TrainingHistoryDisplay:
     """反復（木の本数・エポック）ごとの学習・検証の損失（foldごとに1組の線）。
 
@@ -223,20 +234,22 @@ class TrainingHistoryDisplay:
         return cls(histories).plot(ax=ax)
 
     def plot(self, ax: Any = None) -> Self:
-        """学習の推移を描く。"""
+        """学習の推移を描く。
+
+        損失の非有限値（NaN・±inf）は描かない（その反復で線を切る）。全てが非有限の線は描かない。
+        """
         ensure_japanese_font()
         fig, ax = new_axes(ax, figsize=(9, 5))
         colors = [f"C{i}" for i in range(10)]
         for i, h in enumerate(self.histories):
             color = colors[i % len(colors)]
-            if h.valid is not None:
+            valid, train = _finite_or_none(h.valid), _finite_or_none(h.train)
+            if valid is not None:
+                ax.plot(np.arange(1, len(valid) + 1), valid, color=color, label=f"fold {i} 検証")
+            if train is not None:
                 ax.plot(
-                    np.arange(1, len(h.valid) + 1), h.valid, color=color, label=f"fold {i} 検証"
-                )
-            if h.train is not None:
-                ax.plot(
-                    np.arange(1, len(h.train) + 1),
-                    h.train,
+                    np.arange(1, len(train) + 1),
+                    train,
                     color=color,
                     linestyle="--",
                     alpha=0.7,
@@ -248,7 +261,8 @@ class TrainingHistoryDisplay:
         ax.set_xlabel("反復（木の本数・エポック）")
         ax.set_ylabel(f"損失（{metric}）")
         ax.set_title("学習の推移（実線: 検証, 破線: 学習, 点線: early stoppingで選ばれた反復）")
-        ax.legend(fontsize=8, ncols=2)
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(fontsize=8, ncols=2)
         self.figure_, self.ax_ = fig, ax
         return self
 

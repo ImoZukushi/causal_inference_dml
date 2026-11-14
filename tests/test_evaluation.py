@@ -272,3 +272,38 @@ def test_plot_residuals_by_group(kind: str) -> None:
     assert len(fig.axes) == 4
     assert sum(ax.axison for ax in fig.axes) == 3
     assert displays["B"].ax_.get_title().startswith("B: ")
+
+
+def test_influence_handles_huge_values_and_non_finite_residuals() -> None:
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(60, 3))
+    residuals = rng.normal(size=60)
+    base = compute_influence(X, residuals)
+    # 列ごとの線形変換（極端に大きい値）でも Leverage は変わらず、計算があふれない
+    huge = X * np.array([1e300, 1.0, -1e-300]) + np.array([5.0, 0.0, 0.0])
+    scaled = compute_influence(huge, residuals)
+    assert scaled["leverage"].to_numpy() == pytest.approx(base["leverage"].to_numpy())
+    # 特徴量の ±inf は中央値で埋める。残差の非有限の行は、標準化残差・Cook の距離が NaN
+    X_inf = X.copy()
+    X_inf[0, 0], X_inf[1, 1] = np.inf, -np.inf
+    e = residuals.copy()
+    e[[2, 3]] = [np.inf, np.nan]
+    result = compute_influence(X_inf, e)
+    assert np.isfinite(result["leverage"]).all()
+    assert result.loc[[2, 3], "cooks_distance"].isna().all()
+    assert np.isfinite(result.drop(index=[2, 3])["cooks_distance"]).all()
+    display = InfluenceDisplay(result, 4).plot()
+    plt.close(display.figure_)
+
+
+def test_training_history_and_correlogram_with_non_finite_values() -> None:
+    history = TrainingHistory("l2", train=[3.0, np.inf, 1.0], valid=[np.nan, np.inf, np.inf])
+    display = TrainingHistoryDisplay.from_histories([history])
+    # 全てが非有限の検証の線は描かず、学習の線は有限の点だけを描く
+    lines = display.ax_.get_lines()
+    assert len(lines) == 1 and np.isfinite(display.ax_.get_ylim()).all()
+    plt.close(display.figure_)
+    residuals = np.r_[np.random.default_rng(5).normal(size=100), np.inf, -np.inf, np.nan]
+    correlogram = ResidualCorrelogramDisplay.from_residuals(residuals)
+    assert correlogram.n_obs["残差"] == 100
+    plt.close(correlogram.figure_)

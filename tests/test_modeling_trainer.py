@@ -233,3 +233,37 @@ def test_fit_pipeline_uses_sample_weight(model_name: str) -> None:
     weighted = fit_pipeline(config, X, y, sample_weight=weights).predict(X).mean()
     assert plain == pytest.approx(5.0, abs=0.5)
     assert weighted == pytest.approx(9.0, abs=0.5)
+
+
+def test_fit_pipeline_drops_rows_with_non_finite_targets(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    rng = np.random.default_rng(0)
+    n = 200
+    X = pd.DataFrame({"x": rng.normal(size=n)})
+    y = 2.0 * X["x"].to_numpy() + rng.normal(scale=0.1, size=n)
+    y_bad = y.copy()
+    y_bad[[0, 1, 2]] = [np.inf, -np.inf, np.nan]
+    config = ExperimentConfig.model_validate(
+        {
+            "name": "inf",
+            "task": "regression",
+            "data": {"train_path": "unused.csv", "target": "y"},
+            "cv": {"method": "kfold", "n_splits": 2},
+            "model": {
+                "name": "lightgbm",
+                "params": {"n_estimators": 30},
+                "early_stopping_rounds": 5,
+            },
+            "metrics": ["mae"],
+        }
+    )
+    weights = np.ones(n)
+    with caplog.at_level(logging.WARNING):
+        pipeline = fit_pipeline(config, X, y_bad, X.iloc[:50], y_bad[:50], sample_weight=weights)
+    pred = pipeline.predict(X)
+    # 非有限の行を除いて学習するので、予測は有限で、正常な行だけで学習した場合と同じ
+    assert np.isfinite(pred).all()
+    expected = fit_pipeline(config, X.iloc[3:], y[3:], X.iloc[3:50], y[3:50]).predict(X)
+    assert pred == pytest.approx(expected)
+    assert "非有限" in caplog.text

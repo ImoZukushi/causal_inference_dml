@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,8 @@ from modeling.trainer import CVResult
 from util.plotting import add_caption, ensure_japanese_font
 
 EVALUATION_DIR = "evaluation"
+
+logger = logging.getLogger(__name__)
 
 # Leverage の計算（特異値分解）に使う最大行数。多い場合はfoldごとに無作為に抽出する
 _MAX_INFLUENCE_ROWS = 200_000
@@ -138,9 +141,9 @@ class _Saver:
 
 
 def _predicted_rows(cv_result: CVResult, dataset_y: np.ndarray) -> np.ndarray:
-    """OOF予測がある行（どのfoldの検証にも入らない行・予測が欠損の行・正解が欠損の行を除く）。
+    """OOF予測がある行（どのfoldの検証にも入らない行・予測が非有限の行・正解が非有限の行を除く）。
 
-    正解が欠損の行（再帰予測で履歴としてだけ残した行）は残差が計算できないため除く。
+    正解が欠損・±inf の行（再帰予測で履歴としてだけ残した行など）は残差が計算できないため除く。
     時刻順の診断（自己相関など）では、除いた行を詰めて並べる。
     """
     pred = cv_result.oof_pred
@@ -152,9 +155,9 @@ def _predicted_rows(cv_result: CVResult, dataset_y: np.ndarray) -> np.ndarray:
 
 
 def _observed(y: np.ndarray) -> np.ndarray:
-    """正解が欠損でない行（分類のラベルなど浮動小数でない正解は全行）。"""
+    """正解が有限の行（欠損・±inf を除く。分類のラベルなど浮動小数でない正解は全行）。"""
     y = np.asarray(y)
-    return ~np.isnan(y) if y.dtype.kind == "f" else np.ones(len(y), dtype=bool)
+    return np.isfinite(y) if y.dtype.kind == "f" else np.ones(len(y), dtype=bool)
 
 
 def _save_regression(
@@ -165,7 +168,10 @@ def _save_regression(
     saver: _Saver,
     note: str,
 ) -> None:
-    """回帰・時系列の残差の図・表を保存する。"""
+    """回帰・時系列の残差の図・表を保存する（正解・予測が有限の行が無ければ作らない）。"""
+    if rows.size == 0:
+        logger.warning("正解・予測が有限の行が無いため、残差の図・表を作りません")
+        return
     ev = config.evaluation
     y, pred = dataset.y[rows], cv_result.oof_pred[rows]
     series_rows = _series_rows(config, dataset, rows)
@@ -362,8 +368,8 @@ def _oof_influence(
         residuals = dataset.y[fold_rows] - cv_result.oof_pred[fold_rows]
         try:
             inf = compute_influence(X, residuals)
-        except ValueError:
-            # 行数が特徴量数以下のfoldは計算できないため飛ばす
+        except (ValueError, np.linalg.LinAlgError):
+            # 行数が特徴量数以下のfold・特異値分解が収束しないfoldは計算できないため飛ばす
             continue
         ranks.append(float(inf["leverage"].sum()))
         frames.append(inf.assign(row=fold_rows, fold=fold))

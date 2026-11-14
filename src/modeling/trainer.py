@@ -7,6 +7,7 @@ fitする（検証fold・テストデータは `transform` / `predict` のみ）
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,8 @@ from modeling.metrics import get_metric
 from modeling.models import get_model_spec
 from modeling.pipeline import MODEL_STEP, build_pipeline
 from modeling.tasks import Task, predict
+
+logger = logging.getLogger(__name__)
 
 # fold完了ごとに呼ばれるコールバック（fold番号, そのfoldの主指標スコア）。
 # Optunaの途中打ち切り（pruning）に使う。
@@ -61,6 +64,29 @@ class CVResult:
         return {k: float(np.std(v)) for k, v in self.fold_scores.items()}
 
 
+def _finite_target_rows(
+    X: pd.DataFrame, y: np.ndarray, sample_weight: np.ndarray | None, name: str
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray | None]:
+    """目的変数が有限の行だけを返す（全行が有限なら入力のまま）。
+
+    分類のラベルなど浮動小数でない目的変数は、そのまま返す。
+    """
+    y = np.asarray(y)
+    if y.dtype.kind != "f":
+        return X, y, sample_weight
+    finite = np.isfinite(y)
+    if finite.all():
+        return X, y, sample_weight
+    logger.warning(
+        "%sデータの目的変数が非有限（NaN・±inf）の %d行を除きます（%d行中）",
+        name,
+        int((~finite).sum()),
+        len(y),
+    )
+    weight = None if sample_weight is None else np.asarray(sample_weight)[finite]
+    return X.iloc[np.flatnonzero(finite)], y[finite], weight
+
+
 def fit_pipeline(
     config: ExperimentConfig,
     X_train: pd.DataFrame,
@@ -87,9 +113,17 @@ def fit_pipeline(
         sample_weight: 学習データの行ごとの重み（Noneなら重みなし）。モデルの `fit` に渡す。
             early stopping の検証データには重みを付けない。
 
+    目的変数が非有限（NaN・±inf）の行は、学習にも early stopping の検証にも使わない
+    （損失・予測が非有限になり、学習が壊れるため）。除いた行があれば警告をログに出す。
+
     Returns:
         学習済みPipeline。
     """
+    X_train, y_train, sample_weight = _finite_target_rows(X_train, y_train, sample_weight, "学習")
+    if X_valid is not None and y_valid is not None:
+        X_valid, y_valid, _ = _finite_target_rows(X_valid, y_valid, None, "early stopping の検証")
+        if len(y_valid) == 0:
+            X_valid, y_valid = None, None
     spec = get_model_spec(config.model.name)
     rounds = config.model.early_stopping_rounds if early_stopping else None
     if X_valid is None:

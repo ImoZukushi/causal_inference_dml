@@ -24,14 +24,20 @@ from util.plotting import ensure_japanese_font
 
 
 def _design_matrix(X: Any) -> np.ndarray:
-    """特徴量行列を float に変換し、欠損は列の中央値で埋め、切片の列を加える。"""
+    """特徴量行列を float に変換し、欠損・±inf は列の中央値で埋め、切片の列を加える。
+
+    各列は中央値を引いて、絶対値の最大で割る（極端に大きい値で特異値分解があふれないように）。
+    切片の列があるので、列ごとのこの変換でハット行列（Leverage）は変わらない。
+    """
     arr = np.asarray(X, dtype=np.float64)
     if arr.ndim == 1:
         arr = arr[:, None]
     # ハット行列は欠損を扱えないため、列の中央値で埋める（全て欠損の列は0）
     medians = np.nanmedian(np.where(np.isfinite(arr), arr, np.nan), axis=0)
     medians = np.where(np.isfinite(medians), medians, 0.0)
-    arr = np.where(np.isfinite(arr), arr, medians)
+    arr = np.where(np.isfinite(arr), arr, medians) - medians
+    scales = np.abs(arr).max(axis=0) if arr.shape[0] else np.ones(arr.shape[1])
+    arr = arr / np.where(np.isfinite(scales) & (scales > 0), scales, 1.0)
     return np.column_stack([np.ones(arr.shape[0]), arr])
 
 
@@ -49,8 +55,11 @@ def compute_influence(X: Any, residuals: Any) -> pd.DataFrame:
         列 `row`（入力の行番号）, `leverage`, `residual`, `standardized_residual`,
         `cooks_distance` の表。
 
+    残差が非有限（NaN・±inf）の行は、残差の分散の推定に使わず、
+    標準化残差・Cook の距離を NaN にする。
+
     Raises:
-        ValueError: 行数が合わない場合、または行数が特徴量数（ランク）以下の場合。
+        ValueError: 行数が合わない場合、または残差が有限の行数が特徴量数（ランク）以下の場合。
     """
     design = _design_matrix(X)
     e = as_1d_float(residuals)
@@ -60,11 +69,16 @@ def compute_influence(X: Any, residuals: Any) -> pd.DataFrame:
     u, singular, _ = np.linalg.svd(design, full_matrices=False)
     tol = singular.max() * max(design.shape) * np.finfo(np.float64).eps
     rank = int((singular > tol).sum())
-    if n <= rank:
-        raise ValueError(f"行数（{n}）が特徴量のランク（{rank}）以下のため計算できません")
+    finite = np.isfinite(e)
+    n_finite = int(finite.sum())
+    if n_finite <= rank:
+        raise ValueError(
+            f"残差が有限の行数（{n_finite}）が特徴量のランク（{rank}）以下のため計算できません"
+        )
     # ハット行列の対角 = 列空間の正規直交基底 U の各行の二乗和
     leverage = (u[:, :rank] ** 2).sum(axis=1)
-    s2 = float((e**2).sum() / (n - rank))
+    s2 = float((e[finite] ** 2).sum() / (n_finite - rank))
+    e = np.where(finite, e, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
         standardized = e / np.sqrt(s2 * (1.0 - leverage))
         cooks = standardized**2 / rank * leverage / (1.0 - leverage)
@@ -132,6 +146,10 @@ class InfluenceDisplay:
         inf = self.influence.dropna(
             subset=["leverage", "standardized_residual", "cooks_distance"]
         ).reset_index(drop=True)
+        # 非有限の値（±inf）も描かない
+        inf = inf[
+            np.isfinite(inf[["leverage", "standardized_residual", "cooks_distance"]]).all(axis=1)
+        ].reset_index(drop=True)
         n, p = len(inf), max(self.n_params, 1)
         top = inf.sort_values("cooks_distance", ascending=False, kind="stable").head(n_labels)
         # 散布図は間引くが、Cook の距離の上位は必ず描く

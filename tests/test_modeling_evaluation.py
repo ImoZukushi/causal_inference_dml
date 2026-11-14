@@ -339,3 +339,21 @@ def test_single_series_summary_has_only_overall_row(
     result = _run(synthetic_frame, _config("regression"), tmp_path)
     summary = pd.read_csv(result.output_dir / "evaluation" / "residual_summary.csv")
     assert summary["series"].pipe(as_list) == ["all"]
+
+
+def test_regression_outputs_with_non_finite_targets_and_features(
+    synthetic_frame: pd.DataFrame, tmp_path: Path
+) -> None:
+    # 目的変数に ±inf、特徴量に ±inf・NaN がある回帰（NaN の目的変数は通常の回帰では使えない）
+    frame = synthetic_frame.copy()
+    y = frame["y_reg"].to_numpy(dtype=float, copy=True)
+    y[[0, 5, 9]] = [np.inf, -np.inf, np.inf]
+    frame["y_reg"] = y
+    values = frame["a"].to_numpy(dtype=float, copy=True)
+    values[[1, 2, 3]] = [np.inf, -np.inf, np.nan]
+    frame["a"] = values
+    result = _run(frame, _config("regression"), tmp_path)
+    assert _files(result) == REGRESSION_FILES
+    summary = pd.read_csv(result.output_dir / "evaluation" / "residual_summary.csv")
+    assert np.isfinite(summary["rmse"][0])
+    assert np.isfinite(result.cv_result.oof_scores["rmse"])

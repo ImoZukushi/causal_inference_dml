@@ -292,3 +292,10 @@ def test_binary_experiment_with_new_metrics_logs_to_mlflow(
     assert logged["oof_pr_auc"] == pytest.approx(result.cv_result.oof_scores["pr_auc"])
     scores = pd.read_csv(result.output_dir / "cv_scores.csv")
     assert "pauc@0.05" in scores.columns
+
+
+def test_metrics_skip_infinite_targets() -> None:
+    y = np.array([1.0, np.inf, 3.0, -np.inf, np.nan])
+    p = np.array([2.0, 100.0, 5.0, -100.0, 0.0])
+    # 正解が ±inf・NaN の行は除いて計算する
+    assert _score("mae", y, p) == pytest.approx(1.5)
