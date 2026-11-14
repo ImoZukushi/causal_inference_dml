@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pandas as pd
 import pytest
 from pandas_helpers import as_list, records, row_at
@@ -23,6 +25,20 @@ def test_one_hot_encoder_all_categories() -> None:
     out = enc.transform(train)
     assert set(out.columns) == {"c", "c_a", "c_b", "c_c"}
     assert row_at(out, 0) == {"c": "a", "c_a": 1.0, "c_b": 0.0, "c_c": 0.0}
+
+
+def test_one_hot_encoder_many_categories_without_fragmentation() -> None:
+    # カテゴリが多くても、列をまとめて加えるので断片化の警告が出ず、行のインデックスも保つ
+    train = pd.DataFrame({"x": [1.0, 2.0] * 300, "c": [f"v{i}" for i in range(600)]})
+    train.index = train.index + 10
+    enc = PandasOneHotEncoder("c").fit(train)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.PerformanceWarning)
+        out = enc.transform(train)
+    assert list(out.columns[:2]) == ["x", "c"]
+    assert out.shape == (600, 602)
+    assert out.index.equals(train.index)
+    assert out.loc[15, "c_v5"] == 1.0 and out.loc[15, "c_v6"] == 0.0
 
 
 def test_one_hot_encoder_frequent_categories_only() -> None:

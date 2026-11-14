@@ -274,13 +274,32 @@ def _compute_oof_shap(
         data_list.append(Xt)
         row_list.append(fold_rows)
 
+    # fold ごとにモデルの特徴量の列が違うことがある（ワンホットの列は、その fold の学習側にある
+    # カテゴリの分だけ作られる）。全 fold の列の和集合（最初に現れた順）にそろえ、
+    # その fold のモデルに無い列は、SHAP 値を 0（予測に寄与しない）、特徴量を欠損にする
+    columns = list(dict.fromkeys(c for frame in data_list for c in frame.columns))
     return ShapResult(
-        values=np.concatenate(values_list),
+        values=np.concatenate(
+            [
+                _align_columns(v, list(d.columns), columns)
+                for v, d in zip(values_list, data_list, strict=True)
+            ]
+        ),
         base_values=np.concatenate(base_list),
-        data=pd.concat(data_list, ignore_index=True),
+        data=pd.concat([d.reindex(columns=columns) for d in data_list], ignore_index=True),
         rows=np.concatenate(row_list),
         explainer_kind=kind,
     )
+
+
+def _align_columns(values: np.ndarray, columns: list[Any], all_columns: list[Any]) -> np.ndarray:
+    """SHAP 値の配列（特徴量は2次元目）を、`all_columns` の列の並びにそろえる（無い列は 0）。"""
+    if columns == all_columns:
+        return values
+    position = {c: i for i, c in enumerate(all_columns)}
+    aligned = np.zeros((values.shape[0], len(all_columns), *values.shape[2:]), dtype=values.dtype)
+    aligned[:, [position[c] for c in columns]] = values
+    return aligned
 
 
 def _explanation(result: ShapResult, class_index: int | None = None) -> shap.Explanation:

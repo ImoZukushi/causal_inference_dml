@@ -51,7 +51,17 @@ def replace_columns(X: pd.DataFrame, values: Mapping[str, np.ndarray | pd.Series
     Returns:
         列を置き換えた DataFrame。
     """
+    new = {
+        col: pd.Series(value, index=X.index) if isinstance(value, np.ndarray) else value
+        for col, value in values.items()
+    }
+    # 1列ずつ足すと、列が多いとき（カテゴリの多い列のワンホットなど）に DataFrame が断片化して
+    # とても遅くなる（PerformanceWarning も列ごとに出る）ため、加える列はまとめて結合する
+    # （既にある列の置き換えは断片化しないので、1列ずつでよい）
     out = X.copy()
-    for col, value in values.items():
-        out[col] = pd.Series(value, index=X.index) if isinstance(value, np.ndarray) else value
+    for col in [c for c in new if c in X.columns]:
+        out[col] = new[col]
+    added = {col: value for col, value in new.items() if col not in X.columns}
+    if added:
+        out = pd.concat([out, pd.DataFrame(added, index=X.index)], axis=1)
     return out

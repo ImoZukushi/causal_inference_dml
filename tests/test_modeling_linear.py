@@ -116,6 +116,53 @@ def test_ols_has_no_search_space() -> None:
         get_model_spec("ols").search_space(optuna.create_study().ask(), Task.REGRESSION)
 
 
+@pytest.mark.parametrize("model", ["ridge", "lightgbm"])
+def test_oof_shap_aligns_onehot_columns_that_differ_by_fold(
+    synthetic_frame: pd.DataFrame, model: str
+) -> None:
+    # カテゴリ "w" はグループ 0 の行だけにある。グループ 0 を検証にする fold では、学習側に "w" が
+    # 無いので `cat_w` の列ができない（fold ごとにワンホットの列が違う）
+    frame = synthetic_frame.copy()
+    frame["g"] = np.arange(len(frame)) % 3
+    rare = frame.index[frame["g"] == 0][:8]
+    frame.loc[rare, "cat"] = "w"
+    cfg = _config(
+        model,
+        {"n_estimators": 20, "verbose": -1} if model == "lightgbm" else {},
+        data={
+            "train_path": "unused.csv",
+            "target": "y_reg",
+            "group_col": "g",
+            "drop_cols": ["id", "g", "ts", "y_bin", "y_multi"],
+        },
+        cv={"method": "group", "n_splits": 3},
+        features=[
+            {
+                "class": "feature_engineering.categorical.PandasOneHotEncoder",
+                "params": {"variables": ["cat"]},
+            },
+            {"class": "modeling.pipeline.DropColumns", "params": {"columns": ["cat"]}},
+        ],
+    )
+    ds = prepare_dataset(cfg, frame)
+    result = run_cv(cfg, ds.X, ds.y, ds.folds)
+    shap_result = compute_oof_shap(cfg, ds.X, ds.folds, result)
+    names = shap_result.feature_names
+    assert "cat_w" in names and len(names) == len(set(names))
+    assert shap_result.values.shape == (len(shap_result.rows), len(names))
+    assert len(shap_result.importance()) == len(names)
+    # `cat_w` の列が無い fold（グループ 0 が検証）の行は、SHAP 値が 0・特徴量が欠損
+    without = frame["g"].to_numpy()[shap_result.rows] == 0
+    w = names.index("cat_w")
+    assert (shap_result.values[without, w] == 0).all()
+    assert shap_result.data.loc[without, "cat_w"].isna().all()
+    assert shap_result.data.loc[~without, "cat_w"].notna().all()
+    if model == "ridge":
+        # 線形モデルの SHAP は、列をそろえた後も予測を足し算で再現する
+        reconstructed = shap_result.values.sum(axis=1) + shap_result.base_values
+        assert reconstructed == pytest.approx(result.oof_pred[shap_result.rows], abs=1e-8)
+
+
 @pytest.mark.parametrize("model", LINEAR_MODELS)
 def test_linear_shap_is_exact_and_additive(synthetic_frame: pd.DataFrame, model: str) -> None:
     frame = synthetic_frame.copy()
