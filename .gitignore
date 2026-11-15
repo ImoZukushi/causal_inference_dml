@@ -227,3 +227,6 @@ __marimo__/
 /outputs/experiments/
 /outputs/ensembles/
 /outputs/optuna/
+# DML の推定結果（行ごとの CATE など個体単位の値を含むため、コミットしない）
+/outputs/figures/dml/
+/outputs/tables/dml/

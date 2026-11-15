@@ -10,6 +10,7 @@
 | `feature_engineering` | pandas DataFrame を受け取る sklearn 互換の特徴量 transformer | [feature_engineering.md](feature_engineering.md) |
 | `modeling` | 実験の実行基盤（設定・CV・モデル・再帰予測・チューニング・SHAP・アンサンブル・実験ログ） | [modeling.md](modeling.md) |
 | `evaluation` | 誤差評価の可視化（残差・時系列の残差診断・分類・学習曲線・影響度・SHAPの相関） | [evaluation.md](evaluation.md) |
+| `causal_inference` | econml の DML による CATE 推定と感度分析（E-value・omitted variable bias・DoWhy の反証テスト） | [causal_inference.md](causal_inference.md) |
 
 ## 依存関係
 
@@ -24,6 +25,7 @@ util  ←  eda  ←  evaluation  ←  modeling
 - `evaluation` は予測値・実測値・SHAP値などの配列だけを受け取り、`modeling` に依存しません。
   ノートブックで単独で使えます。
 - `modeling` は上のすべてを組み合わせて1実験を実行します。
+- `causal_inference` は `util` と、`modeling` の LightGBM の定義（`modeling.models`）だけを使います。
 
 ## 共通の約束
 
@@ -68,8 +70,8 @@ from modeling.config import ExperimentConfig
 
 | 実例 | 内容 |
 |---|---|
-| `scripts/quickstart_delhi_climate.py` / `notebook/001_quickstart_delhi_climate.ipynb` | 再帰予測・Optuna・SHAP・誤差評価・アンサンブルの一連の流れ |
-| `scripts/eda_delhi_climate.py` / `notebook/002_eda_delhi_climate.ipynb` | `eda` の使い方 |
+| `scripts/quickstart_delhi_climate.py` | 再帰予測・Optuna・SHAP・誤差評価・アンサンブルの一連の流れ |
+| `scripts/eda_delhi_climate.py` | `eda` の使い方 |
 | `configs/experiments/*.yaml` / `configs/ensembles/*.yaml` | 実験・アンサンブルの設定の例 |
 | `tests/test_*.py` | 各関数の細かな挙動（境界条件・入力の形） |
 

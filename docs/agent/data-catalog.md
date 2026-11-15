@@ -4,6 +4,25 @@
 
 ## データセット一覧
 
+### DML 用の合成データ（`dummy_dml`）
+
+CATE の推定と感度分析の動作確認用に、真の効果が分かるように作った合成データ。実データではない。
+
+| 項目 | 内容 |
+|------|------|
+| パス | `data/synthetic/dml/dummy_dml.csv`（分析用）、`dummy_dml_truth.csv`（行ごとの真の CATE）、`dummy_dml_truth.json`（真の ATE と生成の設定） |
+| 生成 | `uv run python scripts/generate_dummy_dml.py`（`--missing-rate`・`--inf-rate` で NaN・±inf を入れられる。`--confounding-strength` で未観測交絡を入れられる） |
+| 粒度 | 1行 = 1個体（既定 10,000 行） |
+| 機密度 | なし（合成データ。gitの管理外） |
+| 注意点 | 真の ATE は 1.0（母集団）。CATE は X1〜X5 だけで変わる |
+
+| カラム名 | 型 | 説明 |
+|---------|-----|------|
+| `Y` | float | 結果変数 |
+| `T` | float | 処置変数（連続値） |
+| `X1`〜`X15` | float | 交絡因子（T と Y の両方に効く）かつ効果修飾因子 |
+| `W1`〜`W30` | float | Y にだけ効く共変量（T とは独立。交絡因子ではない） |
+
 <!-- TODO: 以下のテンプレートに従ってデータセットを追加してください -->
 
 ### データセット名

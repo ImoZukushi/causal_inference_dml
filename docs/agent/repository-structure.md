@@ -37,6 +37,20 @@
 | `src/feature_engineering/` | sklearn互換の特徴量エンジニアリングtransformer |
 | `src/modeling/` | モデル学習基盤（CV・モデル・チューニング・SHAP・実験ログ・アンサンブル） |
 | `src/evaluation/` | 誤差評価の可視化（残差・時系列の残差診断・分類・学習曲線・影響度・SHAPの相関） |
+| `src/causal_inference/` | econml の DML による CATE 推定（cross-fitting・Optuna）と感度分析（E-value・omitted variable bias・DoWhy の反証テスト）、その図 |
+
+## 因果推論（CATE）の実行手順
+
+```bash
+# 合成データの生成（data/synthetic/dml/）
+uv run python scripts/generate_dummy_dml.py
+# ノートブックの実行（図は outputs/figures/dml/<RUN_ID>/、表は outputs/tables/dml/<RUN_ID>/）
+uv run papermill notebook/001_cate_estimation_dml.ipynb outputs/001_cate_estimation_dml.ipynb --cwd notebook
+```
+
+DoWhy 0.12 が networkx 3.5 以降で動かない（`d_separated` が削除された）ため、`pyproject.toml` で
+`networkx<3.5` に固定している。DoWhy 0.14 は Python 3.12 で `scipy<=1.15.3` を要求し、このプロジェクトの
+scipy と両立しないため使えない。
 
 各パッケージの仕様と使い方は [docs/modules/](../modules/README.md) を参照。
 
@@ -44,8 +58,8 @@
 
 一連の流れ（特徴量のPipeline化 → 再帰予測 → Optuna → SHAP → アンサンブル）を
 Pythonから使う例は `scripts/quickstart_delhi_climate.py`（QuickStart）を参照。
-同じ内容をセルごとに解説付きで実行できるノートブック版は `notebook/001_quickstart_delhi_climate.ipynb`。
-同じデータのEDA（`src/eda` の使い方の例）は `scripts/eda_delhi_climate.py` / `notebook/002_eda_delhi_climate.ipynb`。
+
+同じデータのEDA（`src/eda` の使い方の例）は `scripts/eda_delhi_climate.py`。
 
 ```bash
 # 実験（CV学習・予測・SHAP・MLflow記録）
