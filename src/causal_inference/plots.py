@@ -18,6 +18,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.container import BarContainer
 from matplotlib.patches import Patch
 
+from causal_inference.estimators import ci_columns, ci_level_label
 from causal_inference.nuisance import NuisanceTuningResult
 from util.plotting import ensure_japanese_font
 
@@ -184,56 +185,87 @@ def plot_cate_by_feature(
     true_cate: np.ndarray | None = None,
     features: Sequence[str] | None = None,
     n_bins: int = 10,
-    n_cols: int = 5,
+    n_cols: int = 2,
+    ci_alphas: Sequence[float] = (0.05, 0.01),
+    band_alphas: Sequence[float] = (0.35, 0.15),
 ) -> plt.Figure:
     """X の各変数の分位ごとの CATE の平均（どの変数で効果が変わるか）。
 
-    変数を分位で `n_bins` 個に分け、各区間の CATE の平均を線で、推定した CATE の CI の下限・上限の
-    平均を帯で描く。他の変数の影響も混ざった周辺的な関係である点に注意。
+    変数を分位で `n_bins` 個に分け、各区間の CATE の点推定の平均を線で、各信頼水準の CI の
+    下限・上限の平均を帯で描く。帯は狭い CI（例: 95%）ほど濃く、広い CI（例: 99%）ほど薄く塗る。
+    他の変数の影響も混ざった周辺的な関係である点に注意。
 
     Args:
         x: X（`estimates` と同じ行の並び）。
-        estimates: {推定器名: 列 `cate`, `cate_lower`, `cate_upper` を持つ表}。
+        estimates: {推定器名: 列 `cate` と、`ci_alphas` の各水準の CI の列
+            （`estimators.ci_columns` の列名。例: `cate_lower_95`）を持つ表}
+            （`summarize_effects(..., extra_alphas=...)` の結果）。
         true_cate: 行ごとの真の CATE（あれば黒の破線で重ねる）。
         features: 描く変数（None なら X の全列）。
         n_bins: 分位の数。
         n_cols: 1行に並べる図の数。
+        ci_alphas: 帯で描く CI の有意水準（例: (0.05, 0.01) で 95% と 99%）。
+        band_alphas: 帯の塗りの不透明度。CI の狭い順（信頼水準の低い順）に対応させる。
 
     Returns:
         図。
+
+    Raises:
+        KeyError: `ci_alphas` の CI の列が `estimates` の表に無い場合。
+        ValueError: `band_alphas` の数が `ci_alphas` より少ない場合。
     """
+    # 狭い CI（有意水準の大きい順）から並べ、濃い塗りを対応させる
+    levels = sorted(dict.fromkeys(ci_alphas), reverse=True)
+    if len(band_alphas) < len(levels):
+        raise ValueError(f"band_alphas は {len(levels)} 個以上必要です: {band_alphas}")
+    for name, frame in estimates.items():
+        missing = [c for a in levels for c in ci_columns(a) if c not in frame.columns]
+        if missing:
+            raise KeyError(f"{name} の表に CI の列がありません: {missing}")
+
     features = list(features) if features is not None else list(x.columns)
     n_rows = int(np.ceil(len(features) / n_cols))
     fig, axes = plt.subplots(
-        n_rows, n_cols, figsize=(3.6 * n_cols, 3.0 * n_rows), sharey=True, squeeze=False,
+        n_rows, n_cols, figsize=(6.5 * n_cols, 3.2 * n_rows), sharey=True, squeeze=False,
         constrained_layout=True,
     )  # fmt: skip
     colors = dict(zip(estimates, sns.color_palette("muted", len(estimates)), strict=True))
+    # 推定器が1つなら凡例に推定器名を付けない
+    prefix = {name: (f"{name} " if len(estimates) > 1 else "") for name in estimates}
     for ax, feature in zip(axes.flat, features, strict=False):
         values = x[feature].to_numpy(dtype=float)
         # 同じ値が多い変数でも区間を作れるよう、重複した境界はまとめる
         bins = pd.qcut(pd.Series(values), q=n_bins, duplicates="drop")
         centers = pd.Series(values).groupby(bins, observed=True).mean()
         for name, frame in estimates.items():
-            grouped = frame.reset_index(drop=True).groupby(
-                bins.reset_index(drop=True), observed=True
-            )
-            means = grouped[["cate", "cate_lower", "cate_upper"]].mean()
-            ax.plot(centers, means["cate"], marker="o", ms=3, color=colors[name], label=name)
-            ax.fill_between(centers, means["cate_lower"], means["cate_upper"],
-                            color=colors[name], alpha=0.15)  # fmt: skip
+            means = frame.reset_index(drop=True).groupby(bins, observed=True).mean()
+            # 広い CI（薄い帯）を先に描き、その上に狭い CI（濃い帯）と点推定を重ねる
+            for level, band_alpha in reversed(list(zip(levels, band_alphas, strict=False))):
+                lower_col, upper_col = ci_columns(level)
+                ax.fill_between(
+                    centers, means[lower_col], means[upper_col], color=colors[name],
+                    alpha=band_alpha, lw=0, label=f"{prefix[name]}{ci_level_label(level)}% CI",
+                )  # fmt: skip
+            ax.plot(centers, means["cate"], marker="o", ms=3, color=colors[name],
+                    label=f"{prefix[name]}点推定")  # fmt: skip
         if true_cate is not None:
             truth = pd.Series(np.asarray(true_cate, dtype=float))
             ax.plot(centers, truth.groupby(bins, observed=True).mean(), color=TRUE_COLOR,
                     ls="--", lw=1.2, label="真の CATE")  # fmt: skip
+        ax.axhline(0, color="gray", lw=0.8, ls=":")
         ax.set_title(feature)
+        ax.set_xlabel(f"{feature}（区間の平均）")
     for ax in list(axes.flat)[len(features) :]:
         ax.set_visible(False)
     for ax in axes[:, 0]:
         ax.set_ylabel("CATE の平均")
     handles, labels = axes.flat[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="outside lower center", ncol=len(labels))
-    fig.suptitle(f"変数の分位（{n_bins}区間）ごとの CATE の平均（帯: CI の下限・上限の平均）")
+    level_text = "・".join(f"{ci_level_label(a)}%" for a in levels)
+    fig.suptitle(
+        f"変数の分位（{n_bins}区間）ごとの CATE の平均\n"
+        f"（線: 点推定、帯: {level_text} CI の下限・上限の平均。濃い帯ほど信頼水準が低い）"
+    )
     return fig
 
 

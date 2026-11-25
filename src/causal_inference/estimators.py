@@ -14,7 +14,7 @@ T は連続値（`discrete_treatment=False`）で、効果は「T を1単位増�
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -254,37 +254,76 @@ class EffectSummary:
         }
 
 
+def ci_level_label(alpha: float) -> str:
+    """有意水準 `alpha` の CI の信頼水準の表示名（例: 0.05 → "95"、0.1 → "90"、0.005 → "99.5"）。"""
+    return f"{(1 - alpha) * 100:g}"
+
+
+def ci_columns(alpha: float) -> tuple[str, str]:
+    """有意水準 `alpha` の CATE の CI の列名（下限, 上限）。
+
+    例: 0.05 → ("cate_lower_95", "cate_upper_95")。
+    """
+    label = ci_level_label(alpha)
+    return f"cate_lower_{label}", f"cate_upper_{label}"
+
+
 def summarize_effects(
-    name: str, estimator: Any, x: pd.DataFrame | np.ndarray, alpha: float = 0.05
+    name: str,
+    estimator: Any,
+    x: pd.DataFrame | np.ndarray,
+    alpha: float = 0.05,
+    extra_alphas: Sequence[float] = (),
 ) -> EffectSummary:
     """学習済みの推定器から ATE と行ごとの CATE（点推定と CI）を取り出す。
+
+    CATE の表の列:
+        - `cate`: 点推定
+        - `cate_lower` / `cate_upper`: 有意水準 `alpha` の CI（ATE の CI と同じ水準）
+        - `cate_lower_<水準>` / `cate_upper_<水準>`: `alpha` と `extra_alphas` のそれぞれの CI
+          （例: alpha=0.05 → `cate_lower_95`、0.01 → `cate_lower_99`。`ci_columns` で列名を作れる）
 
     Args:
         name: 推定器の名前（表示用）。
         estimator: 学習済みの推定器。
         x: CATE を求める行の X（ATE はこの行の平均）。
-        alpha: CI の有意水準。
+        alpha: CI の有意水準（ATE と `cate_lower`/`cate_upper` に使う）。
+        extra_alphas: CATE の CI を追加で求める有意水準（例: (0.01,) で 99% CI）。
 
     Returns:
         推定結果。
 
     Raises:
-        ValueError: `x` に欠損・inf がある場合。
+        ValueError: `x` に欠損・inf がある場合、または有意水準が 0 より大きく 1 未満でない場合。
     """
+    alphas = list(dict.fromkeys([alpha, *extra_alphas]))  # 順序を保って重複を除く
+    for value in alphas:
+        if not 0 < value < 1:
+            raise ValueError(f"有意水準は 0 より大きく 1 未満にしてください: {value}")
     x_array = _as_2d(x)
     check_finite("X", x_array)
     cate = np.asarray(estimator.effect(x_array)).ravel()
-    lower, upper = (np.asarray(v).ravel() for v in estimator.effect_interval(x_array, alpha=alpha))
+    columns: dict[str, np.ndarray] = {"cate": cate}
+    for value in alphas:
+        lower, upper = (
+            np.asarray(v).ravel() for v in estimator.effect_interval(x_array, alpha=value)
+        )
+        lower_col, upper_col = ci_columns(value)
+        columns[lower_col], columns[upper_col] = lower, upper
+        if value == alpha:
+            columns["cate_lower"], columns["cate_upper"] = lower, upper
     ate_lower, ate_upper = (
         float(np.ravel(v)[0]) for v in estimator.ate_interval(x_array, alpha=alpha)
     )
     index = x.index if isinstance(x, pd.DataFrame) else None
+    # 基本の列（cate, cate_lower, cate_upper）を先頭にし、水準ごとの CI を続ける
+    order = ["cate", "cate_lower", "cate_upper", *(c for a in alphas for c in ci_columns(a))]
     return EffectSummary(
         name=name,
         ate=float(np.ravel(estimator.ate(x_array))[0]),
         ate_lower=ate_lower,
         ate_upper=ate_upper,
-        cate=pd.DataFrame({"cate": cate, "cate_lower": lower, "cate_upper": upper}, index=index),
+        cate=pd.DataFrame(columns, index=index)[order],
         alpha=alpha,
     )
 

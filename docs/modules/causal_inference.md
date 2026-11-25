@@ -39,10 +39,10 @@ DAG の作成と estimand の同定が済んでいる前提で、econml の Doub
 | モジュール | 主な関数 | 内容 |
 |---|---|---|
 | `nuisance` | `make_cv`, `BlockedTimeSeriesSplit`, `make_nuisance_model`, `tune_nuisance`, `check_finite` | cross-fitting の分割（K-fold または時系列。`n_splits >= 2` を強制）、LightGBM の nuisance モデル、Optuna による探索（目的関数は K-fold の out-of-fold MSE。既定より良い試行が無ければ既定を返す） |
-| `estimators` | `build_estimator`, `fit_estimator`, `summarize_effects`, `tune_causal_forest`, `linear_dml_coefficients`, `nuisance_scores` | `LinearDML`・`CausalForestDML` の生成（`cv_strategy`・`n_splits`・`gap`・`mc_iters` で cross-fitting）、学習、ATE・CATE の点推定と CI |
+| `estimators` | `build_estimator`, `fit_estimator`, `summarize_effects`, `ci_columns`, `tune_causal_forest`, `linear_dml_coefficients`, `nuisance_scores` | `LinearDML`・`CausalForestDML` の生成（`cv_strategy`・`n_splits`・`gap`・`mc_iters` で cross-fitting）、学習、ATE・CATE の点推定と CI（`extra_alphas` で複数の信頼水準。列名は `cate_lower_95`・`cate_lower_99` など） |
 | `evaluation` | `baseline_estimates`, `compare_with_truth` | OLS のベースライン、真の CATE との比較（合成データ専用） |
 | `sensitivity` | `e_value_continuous`, `e_value_table`, `ovb_summary`, `ovb_grid`, `fit_dowhy_wrapper`, `default_refuters`, `run_refuters` | E-value、econml の omitted variable bias 感度分析（Chernozhukov et al. 2022）、DoWhy の反証テスト |
-| `plots` | `plot_*` | 図（`Figure` を返すだけで、保存・表示はしない）。`plot_cv_folds` で分割の形を確認できる |
+| `plots` | `plot_*` | 図（`Figure` を返すだけで、保存・表示はしない）。`plot_cv_folds` で分割の形を確認できる。`plot_cate_by_feature` は点推定と複数の信頼水準の CI（既定 95%・99%。狭い CI ほど濃い帯）を、既定で1行に2つずつ描く |
 | `output` | `OutputSaver` | 図を `outputs/figures/<分析名>/<実行ID>/`、表を `outputs/tables/<分析名>/<実行ID>/` に保存 |
 
 ## 感度分析の使い分け

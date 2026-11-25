@@ -22,6 +22,8 @@ from sklearn.model_selection import KFold  # noqa: E402
 from causal_inference import plots  # noqa: E402
 from causal_inference.estimators import (  # noqa: E402
     build_estimator,
+    ci_columns,
+    ci_level_label,
     fit_estimator,
     linear_dml_coefficients,
     nuisance_scores,
@@ -266,7 +268,9 @@ def test_linear_dml_recovers_ate_and_reports_cate(
     summary = summarize_effects("LinearDML", linear_dml, dataset.x)
     assert summary.ate == pytest.approx(1.0, abs=0.25)
     assert summary.ate_lower < summary.ate < summary.ate_upper
-    assert list(summary.cate.columns) == ["cate", "cate_lower", "cate_upper"]
+    assert list(summary.cate.columns) == [
+        "cate", "cate_lower", "cate_upper", "cate_lower_95", "cate_upper_95",
+    ]  # fmt: skip
     assert len(summary.cate) == len(dataset.x)
     assert (summary.cate["cate_lower"] <= summary.cate["cate_upper"]).all()
     # X1 は CATE を大きくし、X2 は小さくする（真の θ の係数は +0.5・-0.4）
@@ -275,6 +279,32 @@ def test_linear_dml_recovers_ate_and_reports_cate(
     assert coefficients.loc["X1", "coef"] > 0.2 and coefficients.loc["X2", "coef"] < -0.1
     scores = nuisance_scores(linear_dml)
     assert len(scores) == 2 * 3 and set(scores["model"]) == {"model_y", "model_t"}
+
+
+def test_cate_intervals_at_multiple_levels(dataset: SimpleNamespace, causal_forest: object) -> None:
+    assert ci_level_label(0.05) == "95" and ci_level_label(0.01) == "99"
+    assert ci_level_label(0.005) == "99.5"
+    assert ci_columns(0.01) == ("cate_lower_99", "cate_upper_99")
+
+    summary = summarize_effects("CF", causal_forest, dataset.x, alpha=0.05, extra_alphas=[0.01])
+    cate = summary.cate
+    assert list(cate.columns) == [
+        "cate", "cate_lower", "cate_upper",
+        "cate_lower_95", "cate_upper_95", "cate_lower_99", "cate_upper_99",
+    ]  # fmt: skip
+    # 基本の CI は alpha の CI と同じ
+    np.testing.assert_array_equal(cate["cate_lower"], cate["cate_lower_95"])
+    # 99% CI は 95% CI を含み、どちらも点推定を含む
+    assert (cate["cate_lower_99"] <= cate["cate_lower_95"]).all()
+    assert (cate["cate_upper_95"] <= cate["cate_upper_99"]).all()
+    assert (cate["cate_lower_95"] <= cate["cate"]).all() and (
+        cate["cate"] <= cate["cate_upper_95"]
+    ).all()
+    # 同じ水準を重ねて渡しても列は重複しない
+    again = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.05, 0.01, 0.01])
+    assert list(again.cate.columns) == list(cate.columns)
+    with pytest.raises(ValueError, match="有意水準"):
+        summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[1.0])
 
 
 def test_causal_forest_estimates_and_tunes(dataset: SimpleNamespace, causal_forest: object) -> None:
@@ -439,8 +469,8 @@ def test_plots_and_saver(
     tmp_path: Path, dataset: SimpleNamespace, linear_dml: object, causal_forest: object
 ) -> None:
     summaries = {
-        "LinearDML": summarize_effects("LinearDML", linear_dml, dataset.x),
-        "CausalForestDML": summarize_effects("CausalForestDML", causal_forest, dataset.x),
+        name: summarize_effects(name, est, dataset.x, extra_alphas=[0.01])
+        for name, est in (("LinearDML", linear_dml), ("CausalForestDML", causal_forest))
     }
     cate = {name: s.cate for name, s in summaries.items()}
     ate_table = pd.DataFrame([s.to_row() for s in summaries.values()])
@@ -453,6 +483,9 @@ def test_plots_and_saver(
         "scatter": plots.plot_cate_true_vs_estimated(truth_with_nan, cate),
         "dist": plots.plot_cate_distribution(cate, truth_with_nan),
         "by_feature": plots.plot_cate_by_feature(dataset.x, cate, dataset.true_cate),
+        "by_feature_single": plots.plot_cate_by_feature(
+            dataset.x, {"CausalForestDML": cate["CausalForestDML"]}, features=["X1", "X2", "X3"]
+        ),
         "coef": plots.plot_linear_coefficients(
             linear_dml_coefficients(linear_dml, gen.CONFOUNDER_COLS), "係数"
         ),
@@ -498,3 +531,30 @@ def test_plots_and_saver(
     assert saver.figure_dir == tmp_path / "figures" / "dml" / "test"
     assert (tmp_path / "tables" / "dml" / "test" / "ate.csv").is_file()
     assert len(saver.paths) == len(figures) + 1
+
+
+def test_cate_by_feature_draws_two_columns_and_shaded_intervals(
+    dataset: SimpleNamespace, causal_forest: object
+) -> None:
+    cate = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.01]).cate
+    fig = plots.plot_cate_by_feature(dataset.x, {"CF": cate}, features=["X1", "X2", "X3"])
+    visible = [ax for ax in fig.axes if ax.get_visible()]
+    assert len(visible) == 3
+    # 1行に2つ（3変数なら 2行 × 2列で、最後の1つは非表示）
+    assert len(fig.axes) == 4
+    columns = {round(ax.get_position().x0, 3) for ax in visible}
+    assert len(columns) == 2
+    # 帯は 99%（薄い）→ 95%（濃い）の順に描き、凡例は推定器が1つなら推定器名を付けない
+    bands = [c for c in visible[0].collections if c.get_label().endswith("% CI")]
+    assert [b.get_label() for b in bands] == ["99% CI", "95% CI"]
+    assert bands[0].get_alpha() < bands[1].get_alpha()
+    labels = visible[0].get_legend_handles_labels()[1]
+    assert "点推定" in labels
+    plt.close(fig)
+
+    with pytest.raises(KeyError, match="cate_lower_99"):
+        plots.plot_cate_by_feature(
+            dataset.x, {"CF": cate[["cate", "cate_lower_95", "cate_upper_95"]]}
+        )
+    with pytest.raises(ValueError, match="band_alphas"):
+        plots.plot_cate_by_feature(dataset.x, {"CF": cate}, band_alphas=[0.3])
