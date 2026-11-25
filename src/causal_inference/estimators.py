@@ -15,7 +15,7 @@ T は連続値（`discrete_treatment=False`）で、効果は「T を1単位増�
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -232,6 +232,8 @@ class EffectSummary:
         ate_upper: ATE の CI の上限。
         cate: 行ごとの CATE（列 `cate`, `cate_lower`, `cate_upper`）。
         alpha: CI の有意水準（`1 - alpha` の CI）。
+        base_treatment: 処置の基準値 T0。
+        target_treatment: 処置の目標値 T1（効果は T を T0 から T1 に変えたときの Y の変化）。
     """
 
     name: str
@@ -240,11 +242,15 @@ class EffectSummary:
     ate_upper: float
     cate: pd.DataFrame
     alpha: float
+    base_treatment: float = 0.0
+    target_treatment: float = 1.0
 
     def to_row(self) -> dict[str, Any]:
         """ATE の表の1行（推定器の比較用）を返す。"""
         return {
             "estimator": self.name,
+            "base_treatment": self.base_treatment,
+            "target_treatment": self.target_treatment,
             "ate": self.ate,
             "ate_lower": self.ate_lower,
             "ate_upper": self.ate_upper,
@@ -252,6 +258,30 @@ class EffectSummary:
             "cate_mean": float(self.cate["cate"].mean()),
             "cate_std": float(self.cate["cate"].std()),
         }
+
+    def rescaled(self, factor: float) -> EffectSummary:
+        """効果（ATE・CI・CATE の全列）を `factor` 倍した新しい結果を返す。
+
+        Y を定数 c 倍して推定したとき、`factor=1/c` で元の単位に戻す（`scaling` を参照）。
+
+        Args:
+            factor: 倍率（正の値。負だと CI の下限・上限が入れ替わるので受け付けない）。
+
+        Returns:
+            倍率を掛けた推定結果。
+
+        Raises:
+            ValueError: `factor` が正の有限な値でない場合。
+        """
+        if not (np.isfinite(factor) and factor > 0):
+            raise ValueError(f"factor は正の有限な値にしてください: {factor}")
+        return replace(
+            self,
+            ate=self.ate * factor,
+            ate_lower=self.ate_lower * factor,
+            ate_upper=self.ate_upper * factor,
+            cate=self.cate * factor,
+        )
 
 
 def ci_level_label(alpha: float) -> str:
@@ -274,8 +304,15 @@ def summarize_effects(
     x: pd.DataFrame | np.ndarray,
     alpha: float = 0.05,
     extra_alphas: Sequence[float] = (),
+    t0: float = 0.0,
+    t1: float = 1.0,
 ) -> EffectSummary:
     """学習済みの推定器から ATE と行ごとの CATE（点推定と CI）を取り出す。
+
+    効果は処置を基準値 `t0` から目標値 `t1` に変えたときの Y の変化
+    （econml の `effect(X, T0, T1)`）。
+    部分線形モデル（DML）では効果は T について線形なので、θ(X)·(t1 − t0) になり、
+    差 t1 − t0 だけで決まる（基準値の水準によらない）。
 
     CATE の表の列:
         - `cate`: 点推定
@@ -289,43 +326,76 @@ def summarize_effects(
         x: CATE を求める行の X（ATE はこの行の平均）。
         alpha: CI の有意水準（ATE と `cate_lower`/`cate_upper` に使う）。
         extra_alphas: CATE の CI を追加で求める有意水準（例: (0.01,) で 99% CI）。
+        t0: 処置の基準値（base treatment）。
+        t1: 処置の目標値（target treatment）。
 
     Returns:
         推定結果。
 
     Raises:
-        ValueError: `x` に欠損・inf がある場合、または有意水準が 0 より大きく 1 未満でない場合。
+        ValueError: `x` に欠損・inf がある場合、有意水準が 0 より大きく 1 未満でない場合、
+            または `t0`・`t1` が使えない値の場合（`check_treatment_change`）。
     """
     alphas = list(dict.fromkeys([alpha, *extra_alphas]))  # 順序を保って重複を除く
     for value in alphas:
         if not 0 < value < 1:
             raise ValueError(f"有意水準は 0 より大きく 1 未満にしてください: {value}")
+    t0, t1 = check_treatment_change(t0, t1)
     x_array = _as_2d(x)
     check_finite("X", x_array)
-    cate = np.asarray(estimator.effect(x_array)).ravel()
+    change = {"T0": t0, "T1": t1}
+    cate = np.asarray(estimator.effect(x_array, **change)).ravel()
     columns: dict[str, np.ndarray] = {"cate": cate}
     for value in alphas:
         lower, upper = (
-            np.asarray(v).ravel() for v in estimator.effect_interval(x_array, alpha=value)
+            np.asarray(v).ravel() for v in estimator.effect_interval(x_array, **change, alpha=value)
         )
         lower_col, upper_col = ci_columns(value)
         columns[lower_col], columns[upper_col] = lower, upper
         if value == alpha:
             columns["cate_lower"], columns["cate_upper"] = lower, upper
     ate_lower, ate_upper = (
-        float(np.ravel(v)[0]) for v in estimator.ate_interval(x_array, alpha=alpha)
+        float(np.ravel(v)[0]) for v in estimator.ate_interval(x_array, **change, alpha=alpha)
     )
     index = x.index if isinstance(x, pd.DataFrame) else None
     # 基本の列（cate, cate_lower, cate_upper）を先頭にし、水準ごとの CI を続ける
     order = ["cate", "cate_lower", "cate_upper", *(c for a in alphas for c in ci_columns(a))]
     return EffectSummary(
         name=name,
-        ate=float(np.ravel(estimator.ate(x_array))[0]),
+        ate=float(np.ravel(estimator.ate(x_array, **change))[0]),
         ate_lower=ate_lower,
         ate_upper=ate_upper,
         cate=pd.DataFrame(columns, index=index)[order],
         alpha=alpha,
+        base_treatment=t0,
+        target_treatment=t1,
     )
+
+
+def check_treatment_change(t0: float, t1: float) -> tuple[float, float]:
+    """処置の基準値 T0 と目標値 T1 が使える値か確かめて、float で返す。
+
+    Args:
+        t0: 処置の基準値。
+        t1: 処置の目標値。
+
+    Returns:
+        (t0, t1)。
+
+    Raises:
+        ValueError: 有限な値でない、または同じ値（効果が常に 0 になる）の場合。
+    """
+    t0, t1 = float(t0), float(t1)
+    if not (np.isfinite(t0) and np.isfinite(t1)):
+        raise ValueError(f"処置の基準値・目標値は有限な値にしてください: {t0}, {t1}")
+    if t0 == t1:
+        raise ValueError(f"処置の基準値と目標値が同じです（効果は常に 0 になる）: {t0}")
+    return t0, t1
+
+
+def treatment_change_label(t0: float, t1: float, treatment_name: str = "T") -> str:
+    """処置の変化の表示名（例: "T: 0 → 1"）。図のタイトル・軸に使う。"""
+    return f"{treatment_name}: {t0:g} → {t1:g}"
 
 
 def nuisance_scores(estimator: Any) -> pd.DataFrame:

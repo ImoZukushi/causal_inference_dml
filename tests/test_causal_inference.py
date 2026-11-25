@@ -22,12 +22,14 @@ from sklearn.model_selection import KFold  # noqa: E402
 from causal_inference import plots  # noqa: E402
 from causal_inference.estimators import (  # noqa: E402
     build_estimator,
+    check_treatment_change,
     ci_columns,
     ci_level_label,
     fit_estimator,
     linear_dml_coefficients,
     nuisance_scores,
     summarize_effects,
+    treatment_change_label,
     tune_causal_forest,
 )
 from causal_inference.evaluation import baseline_estimates, compare_with_truth  # noqa: E402
@@ -40,6 +42,7 @@ from causal_inference.nuisance import (  # noqa: E402
     tune_nuisance,
 )
 from causal_inference.output import OutputSaver  # noqa: E402
+from causal_inference.scaling import check_scale, rescale_columns  # noqa: E402
 from causal_inference.sensitivity import (  # noqa: E402
     RefuterSpec,
     default_refuters,
@@ -558,3 +561,156 @@ def test_cate_by_feature_draws_two_columns_and_shaded_intervals(
         )
     with pytest.raises(ValueError, match="band_alphas"):
         plots.plot_cate_by_feature(dataset.x, {"CF": cate}, band_alphas=[0.3])
+
+
+# ---------------------------------------------------------------------------
+# Y の定数倍（scaling）
+# ---------------------------------------------------------------------------
+def test_scaling_helpers() -> None:
+    assert check_scale(1000) == 1000.0
+    for bad in (0, -1, np.nan, np.inf):
+        with pytest.raises(ValueError):
+            check_scale(bad)
+    frame = pd.DataFrame({"ate": [2.0], "ate_lower": [1.0], "p_value": [0.5]})
+    scaled = rescale_columns(frame, ["ate", "ate_lower", "missing"], 0.5)
+    assert scaled.loc[0, "ate"] == 1.0 and scaled.loc[0, "ate_lower"] == 0.5
+    assert scaled.loc[0, "p_value"] == 0.5 and frame.loc[0, "ate"] == 2.0  # 入力は変えない
+
+
+def test_effect_summary_and_tuning_result_rescale(
+    dataset: SimpleNamespace, causal_forest: object
+) -> None:
+    summary = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.01])
+    half = summary.rescaled(0.5)
+    assert half.ate == pytest.approx(summary.ate * 0.5)
+    assert half.ate_lower == pytest.approx(summary.ate_lower * 0.5)
+    pd.testing.assert_frame_equal(half.cate, summary.cate * 0.5)
+    with pytest.raises(ValueError):
+        summary.rescaled(-1.0)
+
+    result = tune_nuisance(
+        pd.concat([dataset.x, dataset.w], axis=1).iloc[:300], dataset.y.iloc[:300],
+        cv=make_cv(3, 0), n_trials=2, base_params={"n_estimators": 20, "n_jobs": 2},
+    )  # fmt: skip
+    scaled = result.rescaled_mse(0.01)
+    assert scaled.best_value == pytest.approx(result.best_value * 0.01)
+    assert scaled.baseline_value == pytest.approx(result.baseline_value * 0.01)
+    np.testing.assert_allclose(scaled.trials["value"], result.trials["value"] * 0.01)
+    assert scaled.best_params == result.best_params
+
+
+def test_scaling_y_avoids_collapsed_interval_and_recovers_original_units(
+    dataset: SimpleNamespace,
+) -> None:
+    def fit(y: pd.Series) -> object:
+        estimator = _build("causal_forest_dml", n_estimators=40)
+        return fit_estimator(estimator, y, dataset.t, dataset.x, dataset.w)
+
+    base = summarize_effects("CF", fit(dataset.y), dataset.x)
+    tiny_y = dataset.y * 1e-6
+    # 効果がとても小さい単位だと、econml の CI の幅が 0 になる
+    collapsed = summarize_effects("CF", fit(tiny_y), dataset.x)
+    assert collapsed.ate_lower == collapsed.ate_upper == pytest.approx(collapsed.ate)
+    # Y を定数倍して推定し、元の単位に戻せば、元のデータでの推定と同じになる
+    y_scale = 1e6
+    recovered = summarize_effects("CF", fit(tiny_y * y_scale), dataset.x).rescaled(1 / y_scale)
+    assert recovered.ate_lower < recovered.ate < recovered.ate_upper
+    assert recovered.ate == pytest.approx(base.ate * 1e-6, rel=1e-6)
+    assert recovered.ate_lower == pytest.approx(base.ate_lower * 1e-6, rel=1e-6)
+    assert recovered.ate_upper == pytest.approx(base.ate_upper * 1e-6, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# 処置の基準値・目標値（T0 → T1）
+# ---------------------------------------------------------------------------
+def test_check_treatment_change() -> None:
+    assert check_treatment_change(0, 2) == (0.0, 2.0)
+    assert treatment_change_label(0, 2.5, "price") == "price: 0 → 2.5"
+    for t0, t1 in ((1.0, 1.0), (np.nan, 1.0), (0.0, np.inf)):
+        with pytest.raises(ValueError):
+            check_treatment_change(t0, t1)
+
+
+@pytest.mark.parametrize(("t0", "t1"), [(2.0, 5.0), (1.0, 0.0), (-3.0, -1.5)])
+def test_effects_for_treatment_change_scale_with_difference(
+    dataset: SimpleNamespace, causal_forest: object, t0: float, t1: float
+) -> None:
+    unit = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.01])
+    changed = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.01], t0=t0, t1=t1)
+    delta = t1 - t0
+    assert (changed.base_treatment, changed.target_treatment) == (t0, t1)
+    assert changed.to_row()["base_treatment"] == t0
+    assert changed.to_row()["target_treatment"] == t1
+    # 部分線形モデルでは効果は (T1 − T0) 倍になる
+    assert changed.ate == pytest.approx(unit.ate * delta)
+    np.testing.assert_allclose(changed.cate["cate"], unit.cate["cate"] * delta)
+    # CI の下限 ≤ 上限は、T1 < T0 でも保たれ、幅は |T1 − T0| 倍
+    assert changed.ate_lower <= changed.ate <= changed.ate_upper
+    assert (changed.cate["cate_lower_99"] <= changed.cate["cate_upper_99"]).all()
+    width = changed.ate_upper - changed.ate_lower
+    assert width == pytest.approx((unit.ate_upper - unit.ate_lower) * abs(delta))
+    # 単位の戻し（rescaled）でも基準値・目標値は変わらない
+    assert changed.rescaled(2.0).target_treatment == t1
+
+
+def test_baseline_and_rescale_for_treatment_change(dataset: SimpleNamespace) -> None:
+    unit = baseline_estimates(dataset.y, dataset.t, dataset.x, dataset.w).set_index("estimator")
+    reverse = baseline_estimates(
+        dataset.y, dataset.t, dataset.x, dataset.w, t0=1.0, t1=-1.0
+    ).set_index("estimator")
+    for name in ("naive_ols", "adjusted_ols"):
+        assert reverse.loc[name, "ate"] == pytest.approx(unit.loc[name, "ate"] * -2)
+        assert reverse.loc[name, "ate_lower"] == pytest.approx(unit.loc[name, "ate_upper"] * -2)
+        assert reverse.loc[name, "ate_lower"] < reverse.loc[name, "ate_upper"]
+        assert reverse.loc[name, "base_treatment"] == 1.0
+    with pytest.raises(ValueError):
+        baseline_estimates(dataset.y, dataset.t, dataset.x, t0=1.0, t1=1.0)
+
+    frame = pd.DataFrame({"theta": [1.0], "ci_lower": [0.5], "ci_upper": [2.0], "rv_ci": [0.3]})
+    flipped = rescale_columns(frame, ["theta", "ci_lower", "ci_upper"], -2.0)
+    assert flipped.loc[0, "theta"] == -2.0
+    assert (flipped.loc[0, "ci_lower"], flipped.loc[0, "ci_upper"]) == (-4.0, -1.0)
+    assert flipped.loc[0, "rv_ci"] == 0.3
+
+
+def test_dowhy_estimate_uses_treatment_change(dataset: SimpleNamespace) -> None:
+    rows = slice(0, 400)
+    args = (dataset.y.iloc[rows], dataset.t.iloc[rows], dataset.x.iloc[rows], dataset.w.iloc[rows])
+    unit = fit_dowhy_wrapper(_build("linear_dml"), *args)
+    doubled = fit_dowhy_wrapper(_build("linear_dml"), *args, t0=1.0, t1=3.0)
+    assert float(np.ravel(doubled.estimate_.value)[0]) == pytest.approx(
+        float(np.ravel(unit.estimate_.value)[0]) * 2, rel=1e-6
+    )
+
+
+def test_plots_show_treatment_change(dataset: SimpleNamespace, causal_forest: object) -> None:
+    label = treatment_change_label(2, 5, "T")
+    summary = summarize_effects("CF", causal_forest, dataset.x, extra_alphas=[0.01], t0=2, t1=5)
+    cate = {"CF": summary.cate}
+    figures = [
+        plots.plot_ate_comparison(pd.DataFrame([summary.to_row()]), treatment_change=label),
+        plots.plot_cate_distribution(cate, treatment_change=label),
+        plots.plot_cate_by_feature(dataset.x, cate, features=["X1", "X2"], treatment_change=label),
+        plots.plot_cate_true_vs_estimated(dataset.true_cate * 3, cate, treatment_change=label),
+        plots.plot_refutations(
+            pd.DataFrame(
+                [
+                    {
+                        "refuter": "a",
+                        "estimated_effect": 3.0,
+                        "new_effect": 0.1,
+                        "p_value": 0.5,
+                        "judgement": "OK",
+                        "error": "",
+                    }
+                ]
+            ),
+            treatment_change=label,
+        ),  # fmt: skip
+    ]
+    for fig in figures:
+        texts = [fig.get_suptitle()] + [
+            t for ax in fig.axes for t in (ax.get_title(), ax.get_xlabel())
+        ]
+        assert any("T: 2 → 5" in text for text in texts)
+        plt.close(fig)

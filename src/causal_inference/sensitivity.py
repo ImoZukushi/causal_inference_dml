@@ -322,8 +322,12 @@ def fit_dowhy_wrapper(
     *,
     outcome_name: str = "Y",
     treatment_name: str = "T",
+    t0: float = 0.0,
+    t1: float = 1.0,
 ) -> Any:
     """econml の推定器を DoWhy の因果モデルとして学習し直す（反証テストの準備）。
+
+    DoWhy の推定値（と反証テストの推定値）は、処置を `t0` から `t1` に変えたときの効果。
 
     DoWhy は X と W の両方を処置と結果の共通原因（backdoor 調整集合）とし、X を効果修飾とする。
     推定器は `estimator` の設定（nuisance モデル・cross-fitting）で、DoWhy の中で改めて学習される。
@@ -336,6 +340,8 @@ def fit_dowhy_wrapper(
         w: W。
         outcome_name: 結果変数の名前。
         treatment_name: 処置変数の名前。
+        t0: 処置の基準値（DoWhy の `control_value`）。
+        t1: 処置の目標値（DoWhy の `treatment_value`）。
 
     Returns:
         学習済みの `DoWhyWrapper`（`refute_estimate` を呼べる）。
@@ -356,6 +362,8 @@ def fit_dowhy_wrapper(
         treatment_names=[treatment_name],
         feature_names=list(x.columns),
         confounder_names=[] if w is None else list(w.columns),
+        control_value=t0,
+        treatment_value=t1,
     )
     return wrapper
 

@@ -16,7 +16,7 @@ nuisance の予測精度を選ぶだけで処置効果は直接見ていない�
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -190,6 +190,30 @@ class NuisanceTuningResult:
     trials: pd.DataFrame
     study: optuna.Study = field(repr=False)
     used_baseline: bool = False
+
+    def rescaled_mse(self, factor: float) -> NuisanceTuningResult:
+        """MSE（試行ごとの値・最良値・既定の値）を `factor` 倍した新しい結果を返す。
+
+        目的変数を定数 c 倍してチューニングしたとき、`factor=1/c²` で元の単位の MSE に戻す。
+        パラメータ・study はそのまま（study の値は c 倍した単位のまま）。
+
+        Args:
+            factor: MSE に掛ける倍率（正の値）。
+
+        Returns:
+            MSE を掛けた結果。
+
+        Raises:
+            ValueError: `factor` が正の有限な値でない場合。
+        """
+        if not (np.isfinite(factor) and factor > 0):
+            raise ValueError(f"factor は正の有限な値にしてください: {factor}")
+        return replace(
+            self,
+            best_value=self.best_value * factor,
+            baseline_value=self.baseline_value * factor,
+            trials=self.trials.assign(value=self.trials["value"] * factor),
+        )
 
 
 def cross_validated_mse(

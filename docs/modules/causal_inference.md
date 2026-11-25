@@ -43,6 +43,7 @@ DAG の作成と estimand の同定が済んでいる前提で、econml の Doub
 | `evaluation` | `baseline_estimates`, `compare_with_truth` | OLS のベースライン、真の CATE との比較（合成データ専用） |
 | `sensitivity` | `e_value_continuous`, `e_value_table`, `ovb_summary`, `ovb_grid`, `fit_dowhy_wrapper`, `default_refuters`, `run_refuters` | E-value、econml の omitted variable bias 感度分析（Chernozhukov et al. 2022）、DoWhy の反証テスト |
 | `plots` | `plot_*` | 図（`Figure` を返すだけで、保存・表示はしない）。`plot_cv_folds` で分割の形を確認できる。`plot_cate_by_feature` は点推定と複数の信頼水準の CI（既定 95%・99%。狭い CI ほど濃い帯）を、既定で1行に2つずつ描く |
+| `scaling` | `check_scale`, `rescale_columns` | Y を定数倍して推定したときに、結果を元の単位に戻す |
 | `output` | `OutputSaver` | 図を `outputs/figures/<分析名>/<実行ID>/`、表を `outputs/tables/<分析名>/<実行ID>/` に保存 |
 
 ## 感度分析の使い分け
@@ -56,6 +57,36 @@ DAG の作成と estimand の同定が済んでいる前提で、econml の Doub
 DoWhy の `add_unobserved_common_cause` の `non-parametric-partial-R2` は、econml の推定器と組み合わせると
 特徴量の数が合わずに失敗する（DoWhy 0.12）ため使っていません。同じ考え方の分析は econml の
 omitted variable bias 感度分析で行います。
+
+## 処置の基準値・目標値（T0 → T1）
+
+効果は「処置を基準値 T0 から目標値 T1 に変えたときの Y の変化」として求めます（既定は 0 → 1、
+つまり T を1単位増やしたとき）。`summarize_effects(..., t0=, t1=)`・`baseline_estimates(..., t0=, t1=)`・
+`fit_dowhy_wrapper(..., t0=, t1=)` で指定し、図には `treatment_change=treatment_change_label(t0, t1)`
+を渡すとタイトル・軸に「T: T0 → T1」が表示されます。
+
+- 部分線形モデルでは効果は θ(X)·(T1 − T0) で、差 T1 − T0 だけで決まります（基準値の水準によらない）。
+- econml の感度分析（`ovb_summary`・`ovb_grid`）は1単位あたりの値を返すので、
+  `rescale_columns(..., factor=T1 − T0)` で換算します。T1 < T0 のときは CI の下限・上限を入れ替えます。
+- T0 と T1 が同じ値はエラーにします（`check_treatment_change`）。
+
+## 効果がとても小さい単位のとき（`scaling`）
+
+econml の因果フォレストの CI は、CATE の分散がおよそ 1e-10 以下になると、内部の固定のしきい値で
+標準誤差が NaN になり、ATE の CI が点推定と同じ値（幅 0）になります（エラーも警告も出ません）。
+Y の単位が小さい、または T の単位が大きいデータで起きます。
+
+Y を定数 c 倍して推定し、結果を c で割って戻せば避けられます。部分線形モデルでは効果・CI がちょうど c 倍に
+なるので、統計的な意味は変わりません。ノートブックでは `Y_SCALE` で指定し、表・図・標準出力は元の単位に
+戻して表示します。戻し方は `scaling` モジュールの説明（効果は 1/c 倍、Y のモデルの MSE は 1/c² 倍、
+決定係数・重要度・robustness value・E-value・p 値はそのまま）を参照してください。
+
+| 関数 | 内容 |
+|---|---|
+| `scaling.check_scale` | 定数が正の有限な値か確かめる |
+| `scaling.rescale_columns` | 表の効果の列を倍率倍する（`EFFECT_COLUMNS`・`OVB_EFFECT_COLUMNS`・`REFUTATION_EFFECT_COLUMNS`） |
+| `EffectSummary.rescaled` | ATE・CI・CATE をまとめて倍率倍する |
+| `NuisanceTuningResult.rescaled_mse` | チューニングの MSE を倍率倍する |
 
 ## 注意
 

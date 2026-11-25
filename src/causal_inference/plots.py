@@ -31,6 +31,18 @@ def setup_style() -> None:
     ensure_japanese_font()
 
 
+def _effect_text(treatment_change: str | None) -> str:
+    """効果の説明（例: "T: 0 → 1 のときの Y の変化"）。指定が無ければ T を1単位増やしたとき。"""
+    if treatment_change:
+        return f"{treatment_change} のときの Y の変化"
+    return "T を1単位増やしたときの Y の変化"
+
+
+def _with_change(text: str, treatment_change: str | None) -> str:
+    """図のタイトルに処置の変化（基準値 → 目標値）を添える。"""
+    return f"{text}（{treatment_change}）" if treatment_change else text
+
+
 def _finite(*arrays: np.ndarray) -> np.ndarray:
     """すべての配列で有限な位置（True）を返す。"""
     mask = np.ones(len(arrays[0]), dtype=bool)
@@ -73,7 +85,10 @@ def plot_cv_folds(splitter: Any, n_rows: int, title: str = "cross-fitting の分
 
 
 def plot_ate_comparison(
-    ate_table: pd.DataFrame, true_ate: float | None = None, title: str = "ATE の推定値の比較"
+    ate_table: pd.DataFrame,
+    true_ate: float | None = None,
+    title: str = "ATE の推定値の比較",
+    treatment_change: str | None = None,
 ) -> plt.Figure:
     """推定器ごとの ATE の点推定と CI を横に並べて比べる。
 
@@ -82,6 +97,8 @@ def plot_ate_comparison(
             （ベースラインを含めてよい）。
         true_ate: 真の ATE（合成データのとき。縦線で示す）。
         title: 図のタイトル。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"。`estimators.treatment_change_label`）。
+            指定すると横軸の説明に使う。
 
     Returns:
         図。
@@ -95,16 +112,16 @@ def plot_ate_comparison(
         positions, table.iterrows(), errors.T, colors, strict=True
     ):
         ax.errorbar(row["ate"], pos, xerr=err.reshape(2, 1), fmt="o", capsize=5, color=color)
-        ax.annotate(f"{row['ate']:.3f}", (row["ate"], pos), xytext=(0, 8),
+        ax.annotate(f"{row['ate']:.4g}", (row["ate"], pos), xytext=(0, 8),
                     textcoords="offset points", ha="center")  # fmt: skip
     ax.axvline(0, color="gray", lw=1, ls=":")
     if true_ate is not None:
-        ax.axvline(true_ate, color=TRUE_COLOR, lw=1.5, ls="--", label=f"真の ATE = {true_ate:.3f}")
+        ax.axvline(true_ate, color=TRUE_COLOR, lw=1.5, ls="--", label=f"真の ATE = {true_ate:.4g}")
         ax.legend(loc="lower right")
     ax.set_yticks(positions, table["estimator"])
-    ax.set_xlabel("ATE（T を1単位増やしたときの Y の変化）")
+    ax.set_xlabel(f"ATE（{_effect_text(treatment_change)}）")
     ci_level = table["ci_level"].iloc[0] if "ci_level" in table else 0.95
-    ax.set_title(f"{title}（点: 推定値、線: {ci_level:.0%} CI）")
+    ax.set_title(f"{_with_change(title, treatment_change)}\n点: 推定値、線: {ci_level:.0%} CI")
     return fig
 
 
@@ -113,14 +130,16 @@ def plot_cate_true_vs_estimated(
     estimates: Mapping[str, pd.DataFrame],
     max_points: int = 3000,
     seed: int = 0,
+    treatment_change: str | None = None,
 ) -> plt.Figure:
     """真の CATE と推定した CATE の散布図（推定器ごと）。対角線に乗るほど良い。
 
     Args:
-        true_cate: 行ごとの真の CATE。
+        true_cate: 行ごとの真の CATE（`estimates` と同じ処置の変化での値）。
         estimates: {推定器名: 列 `cate` を持つ表}（行の並びは `true_cate` と同じ）。
         max_points: 描く点の上限（多いときは無作為に間引く）。
         seed: 間引きの乱数シード。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。タイトルに添える。
 
     Returns:
         図。
@@ -145,22 +164,27 @@ def plot_cate_true_vs_estimated(
         ax.plot([low, high], [low, high], color=TRUE_COLOR, lw=1, ls="--", label="推定 = 真値")
         corr = np.corrcoef(truth[valid], estimate[valid])[0, 1]
         rmse = np.sqrt(np.mean((truth[valid] - estimate[valid]) ** 2))
-        ax.set_title(f"{name}\n相関 {corr:.3f}、RMSE {rmse:.3f}")
+        ax.set_title(f"{name}\n相関 {corr:.3f}、RMSE {rmse:.4g}")
         ax.set_xlabel("真の CATE")
         ax.set_ylabel("推定した CATE")
         ax.legend(loc="upper left")
-    fig.suptitle(f"真の CATE と推定した CATE（{len(valid):,} 点を表示）")
+    fig.suptitle(
+        _with_change(f"真の CATE と推定した CATE（{len(valid):,} 点を表示）", treatment_change)
+    )
     return fig
 
 
 def plot_cate_distribution(
-    estimates: Mapping[str, pd.DataFrame], true_cate: np.ndarray | None = None
+    estimates: Mapping[str, pd.DataFrame],
+    true_cate: np.ndarray | None = None,
+    treatment_change: str | None = None,
 ) -> plt.Figure:
     """推定した CATE の分布（真の CATE があれば重ねる）。
 
     Args:
         estimates: {推定器名: 列 `cate` を持つ表}。
         true_cate: 行ごとの真の CATE。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。横軸・タイトルに使う。
 
     Returns:
         図。
@@ -172,9 +196,9 @@ def plot_cate_distribution(
     if true_cate is not None:
         truth = np.asarray(true_cate, dtype=float)
         sns.kdeplot(truth[np.isfinite(truth)], ax=ax, label="真の CATE", color=TRUE_COLOR, ls="--")
-    ax.set_xlabel("CATE")
+    ax.set_xlabel(f"CATE（{_effect_text(treatment_change)}）")
     ax.set_ylabel("密度")
-    ax.set_title("CATE の分布（効果の異質性）")
+    ax.set_title(_with_change("CATE の分布（効果の異質性）", treatment_change))
     ax.legend()
     return fig
 
@@ -188,6 +212,7 @@ def plot_cate_by_feature(
     n_cols: int = 2,
     ci_alphas: Sequence[float] = (0.05, 0.01),
     band_alphas: Sequence[float] = (0.35, 0.15),
+    treatment_change: str | None = None,
 ) -> plt.Figure:
     """X の各変数の分位ごとの CATE の平均（どの変数で効果が変わるか）。
 
@@ -206,6 +231,7 @@ def plot_cate_by_feature(
         n_cols: 1行に並べる図の数。
         ci_alphas: 帯で描く CI の有意水準（例: (0.05, 0.01) で 95% と 99%）。
         band_alphas: 帯の塗りの不透明度。CI の狭い順（信頼水準の低い順）に対応させる。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。タイトルに使う。
 
     Returns:
         図。
@@ -263,7 +289,7 @@ def plot_cate_by_feature(
     fig.legend(handles, labels, loc="outside lower center", ncol=len(labels))
     level_text = "・".join(f"{ci_level_label(a)}%" for a in levels)
     fig.suptitle(
-        f"変数の分位（{n_bins}区間）ごとの CATE の平均\n"
+        f"変数の分位（{n_bins}区間）ごとの CATE の平均（{_effect_text(treatment_change)}）\n"
         f"（線: 点推定、帯: {level_text} CI の下限・上限の平均。濃い帯ほど信頼水準が低い）"
     )
     return fig
@@ -349,6 +375,7 @@ def plot_ovb_contour(
     robustness_value: float | None = None,
     null_hypothesis: float = 0.0,
     bound: str = "ci",
+    treatment_change: str | None = None,
 ) -> plt.Figure:
     """未観測交絡の強さ（c_t, c_y）ごとの、ATE の 0 に近い側の限界の等高線図。
 
@@ -361,6 +388,7 @@ def plot_ovb_contour(
         robustness_value: robustness value（対角線上に印を付ける）。
         null_hypothesis: 効果が無いとみなす値。
         bound: "ci"（標本誤差も含めた範囲）か "theta"（点推定の範囲）。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。タイトルに添える。
 
     Returns:
         図。
@@ -382,7 +410,8 @@ def plot_ovb_contour(
     ax.set_xlabel("c_t（未観測交絡が処置の残差を説明する割合）")
     ax.set_ylabel("c_y（未観測交絡が結果の残差を説明する割合）")
     label = "CI" if bound == "ci" else "点推定"
-    ax.set_title(f"未観測交絡の強さと ATE の範囲（{label}、点推定 {theta:.3f}）")
+    title = f"未観測交絡の強さと ATE の範囲（{label}、点推定 {theta:.4g}）"
+    ax.set_title(f"{title}\n{treatment_change}" if treatment_change else title)
     return fig
 
 
@@ -447,11 +476,12 @@ def plot_e_value_curve(rr: float, e_value: float, label: str) -> plt.Figure:
     return fig
 
 
-def plot_refutations(refutations: pd.DataFrame) -> plt.Figure:
+def plot_refutations(refutations: pd.DataFrame, treatment_change: str | None = None) -> plt.Figure:
     """反証テストごとの、元の推定値と新しい推定値の比較。
 
     Args:
         refutations: `sensitivity.run_refuters` の結果。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。横軸・タイトルに使う。
 
     Returns:
         図。
@@ -469,7 +499,7 @@ def plot_refutations(refutations: pd.DataFrame) -> plt.Figure:
         ax.annotate(text, (0, pos), xytext=(4, 0), textcoords="offset points", va="center")
     ax.axvline(0, color="gray", lw=1, ls=":")
     ax.set_yticks(positions, table["refuter"])
-    ax.set_xlabel("推定値（ATE）")
-    ax.set_title("DoWhy の反証テスト")
+    ax.set_xlabel(f"推定値（ATE。{_effect_text(treatment_change)}）")
+    ax.set_title(_with_change("DoWhy の反証テスト", treatment_change))
     fig.legend(loc="outside lower center", ncol=2)
     return fig

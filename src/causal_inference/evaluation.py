@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-from causal_inference.estimators import EffectSummary
+from causal_inference.estimators import EffectSummary, check_treatment_change
 from causal_inference.nuisance import check_finite
 
 
@@ -19,11 +19,15 @@ def baseline_estimates(
     x: pd.DataFrame | np.ndarray,
     w: pd.DataFrame | np.ndarray | None = None,
     alpha: float = 0.05,
+    t0: float = 0.0,
+    t1: float = 1.0,
 ) -> pd.DataFrame:
-    """DML と比べるためのベースライン（OLS による T の係数）を返す。
+    """DML と比べるためのベースライン（OLS による T の係数から求めた効果）を返す。
 
     - `naive_ols`: Y ~ T（調整なし。交絡があるとずれる）
     - `adjusted_ols`: Y ~ T + X + W（線形の調整。効果の異質性・非線形の交絡は扱えない）
+
+    効果は処置を `t0` から `t1` に変えたときの Y の変化（T の係数 × (t1 − t0)）。
 
     Args:
         y: 結果変数。
@@ -31,13 +35,17 @@ def baseline_estimates(
         x: X。
         w: W。
         alpha: CI の有意水準。
+        t0: 処置の基準値。
+        t1: 処置の目標値。
 
     Returns:
-        列 `estimator`, `ate`, `ate_lower`, `ate_upper`, `ci_level` の DataFrame。
+        列 `estimator`, `base_treatment`, `target_treatment`, `ate`, `ate_lower`, `ate_upper`,
+        `ci_level` の DataFrame。
 
     Raises:
-        ValueError: 入力に欠損・inf がある場合。
+        ValueError: 入力に欠損・inf がある場合、または `t0`・`t1` が使えない値の場合。
     """
+    t0, t1 = check_treatment_change(t0, t1)
     y_array = np.asarray(y, dtype=float).ravel()
     t_array = np.asarray(t, dtype=float).ravel()
     covariates = [np.asarray(x, dtype=float)]
@@ -53,13 +61,17 @@ def baseline_estimates(
     ):
         # HC1（不均一分散に頑健）の標準誤差を使う
         fitted = sm.OLS(y_array, sm.add_constant(design)).fit(cov_type="HC1")
-        lower, upper = fitted.conf_int(alpha=alpha)[1]
+        # T の係数（1単位あたり）を T0→T1 の効果にする（t1 < t0 なら CI の上下が入れ替わる）
+        delta = t1 - t0
+        bounds = sorted(float(b) * delta for b in fitted.conf_int(alpha=alpha)[1])
         rows.append(
             {
                 "estimator": name,
-                "ate": float(fitted.params[1]),
-                "ate_lower": float(lower),
-                "ate_upper": float(upper),
+                "base_treatment": t0,
+                "target_treatment": t1,
+                "ate": float(fitted.params[1]) * delta,
+                "ate_lower": bounds[0],
+                "ate_upper": bounds[1],
                 "ci_level": 1 - alpha,
             }
         )
