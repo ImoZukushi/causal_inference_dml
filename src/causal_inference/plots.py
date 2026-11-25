@@ -503,3 +503,100 @@ def plot_refutations(refutations: pd.DataFrame, treatment_change: str | None = N
     ax.set_title(_with_change("DoWhy の反証テスト", treatment_change))
     fig.legend(loc="outside lower center", ncol=2)
     return fig
+
+
+def _partial_r2_panel(
+    ax: plt.Axes,
+    table: pd.DataFrame,
+    *,
+    null_hypothesis: float,
+    colorbar_label: str,
+    benchmarks: pd.DataFrame | None,
+    point_value: float,
+    point_label: str,
+) -> None:
+    """部分決定係数の等高線図を1枚描く（`plot_partial_r2_contours` の部品）。"""
+    values = table.to_numpy(dtype=float)
+    # 強い交絡の隅では値が極端に大きく（小さく）なるので、色の範囲を「交絡なしの値」と、境界を挟んだ
+    # 反対側の同じ幅までに絞る（はみ出す値は端の色で塗る）。境界付近の違いを見やすくするため
+    span = abs(point_value - null_hypothesis) or float(np.nanmax(np.abs(values))) or 1.0
+    low = max(float(np.nanmin(values)), null_hypothesis - span)
+    high = min(float(np.nanmax(values)), null_hypothesis + span)
+    levels = np.linspace(low, high, 21) if high > low else 20
+    contour = ax.contourf(table.columns, table.index, values, levels=levels, cmap="viridis",
+                          extend="both")  # fmt: skip
+    ax.figure.colorbar(contour, ax=ax, label=colorbar_label)
+    if np.nanmin(values) <= null_hypothesis <= np.nanmax(values):
+        lines = ax.contour(table.columns, table.index, values, levels=[null_hypothesis],
+                           colors="red", linestyles="--", linewidths=2.5)  # fmt: skip
+        ax.clabel(lines, fmt={null_hypothesis: f"{null_hypothesis:g}"})
+    ax.scatter([0], [0], color="black", marker="^", s=80, zorder=4, clip_on=False,
+               label=f"{point_label}（交絡なし）= {point_value:.4g}")  # fmt: skip
+    if benchmarks is not None and not benchmarks.empty:
+        shown = benchmarks.dropna(subset=["r2dz", "r2yz"])
+        ax.scatter(shown["r2dz"], shown["r2yz"], color="red", marker="D", s=40, zorder=4,
+                   clip_on=False, label="benchmark（観測された共変量の k 倍の強さ）")  # fmt: skip
+        points = zip(shown["label"].astype(str), shown["r2dz"], shown["r2yz"], strict=True)
+        for text, r2dz, r2yz in points:
+            ax.annotate(text, (float(r2dz), float(r2yz)), xytext=(5, -12),
+                        textcoords="offset points", color="white", fontsize=9)  # fmt: skip
+    r2dz_values = table.columns.to_numpy(dtype=float)
+    r2yz_values = table.index.to_numpy(dtype=float)
+    ax.set_xlim(float(r2dz_values.min()), float(r2dz_values.max()))
+    ax.set_ylim(float(r2yz_values.min()), float(r2yz_values.max()))
+    ax.set_xlabel("R²(T~Z | X)（未観測交絡が処置の残差を説明する割合）")
+    ax.set_ylabel("R²(Y~Z | T,X)（未観測交絡が結果の残差を説明する割合）")
+
+
+def plot_partial_r2_contours(
+    grid: pd.DataFrame,
+    estimate: float,
+    benchmarks: pd.DataFrame | None = None,
+    alpha: float = 0.05,
+    null_hypothesis: float = 0.0,
+    treatment_change: str | None = None,
+) -> plt.Figure:
+    """部分決定係数（R²_{T~Z|X}, R²_{Y~Z|T,X}）ごとの、調整後の推定値と CI の限界の等高線図。
+
+    左は交絡を調整した推定値、右は CI の 0 に近い側の限界（効果が正なら下限、負なら上限）。
+    赤の破線（`null_hypothesis` の等高線）より右上の強さの交絡があると、結論が変わる。
+    benchmark（観測された共変量の k 倍の強さ）の位置が破線より左下なら、その程度の交絡では
+    結論は変わらない。
+
+    Args:
+        grid: `partial_r2.partial_r2_grid` の結果。
+        estimate: 交絡なしの推定値（効果の向きを決める）。
+        benchmarks: `partial_r2.benchmark_table` の結果（`label`・`r2dz`・`r2yz` の列）。
+        alpha: CI の有意水準（表示用）。
+        null_hypothesis: 結論が変わる境界の値。
+        treatment_change: 処置の変化の表示（例: "T: 0 → 1"）。タイトルに添える。
+
+    Returns:
+        図（1行2列）。
+    """
+    bound = "lower" if estimate >= null_hypothesis else "upper"
+    bound_text = "下限" if bound == "lower" else "上限"
+    level = f"{1 - alpha:.0%}"
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6.2), constrained_layout=True)
+    panels = (
+        ("estimate", axes[0], "調整後の推定値", "推定値"),
+        (bound, axes[1], f"調整後の {level} CI の{bound_text}", f"CI の{bound_text}"),
+    )
+    for column, ax, label, point_label in panels:
+        table = grid.pivot(index="r2yz", columns="r2dz", values=column)
+        point = float(table.to_numpy(dtype=float)[0, 0])
+        _partial_r2_panel(
+            ax,
+            table,
+            null_hypothesis=null_hypothesis,
+            colorbar_label=label,
+            benchmarks=benchmarks,
+            point_value=point,
+            point_label=point_label,
+        )
+        ax.set_title(label)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="outside lower center", ncol=2)
+    title = "部分決定係数による感度分析（Cinelli & Hazlett, 2020）"
+    fig.suptitle(_with_change(title, treatment_change))
+    return fig

@@ -37,7 +37,7 @@
 | `src/feature_engineering/` | sklearn互換の特徴量エンジニアリングtransformer |
 | `src/modeling/` | モデル学習基盤（CV・モデル・チューニング・SHAP・実験ログ・アンサンブル） |
 | `src/evaluation/` | 誤差評価の可視化（残差・時系列の残差診断・分類・学習曲線・影響度・SHAPの相関） |
-| `src/causal_inference/` | econml の DML による CATE 推定（cross-fitting・Optuna）と感度分析（E-value・omitted variable bias・DoWhy の反証テスト）、その図 |
+| `src/causal_inference/` | econml の DML による CATE 推定（cross-fitting・Optuna）と感度分析（E-value・omitted variable bias・部分決定係数・DoWhy の反証テスト）、その図 |
 
 ## 因果推論（CATE）の実行手順
 

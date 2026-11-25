@@ -38,11 +38,12 @@ DAG の作成と estimand の同定が済んでいる前提で、econml の Doub
 
 | モジュール | 主な関数 | 内容 |
 |---|---|---|
-| `nuisance` | `make_cv`, `BlockedTimeSeriesSplit`, `make_nuisance_model`, `tune_nuisance`, `check_finite` | cross-fitting の分割（K-fold または時系列。`n_splits >= 2` を強制）、LightGBM の nuisance モデル、Optuna による探索（目的関数は K-fold の out-of-fold MSE。既定より良い試行が無ければ既定を返す） |
+| `nuisance` | `make_cv`, `BlockedTimeSeriesSplit`, `make_nuisance_model`, `tune_nuisance`, `cross_fit_predict`, `check_finite` | cross-fitting の分割（K-fold または時系列。`n_splits >= 2` を強制）、LightGBM の nuisance モデル、Optuna による探索（目的関数は K-fold の out-of-fold MSE。既定より良い試行が無ければ既定を返す） |
 | `estimators` | `build_estimator`, `fit_estimator`, `summarize_effects`, `ci_columns`, `tune_causal_forest`, `linear_dml_coefficients`, `nuisance_scores` | `LinearDML`・`CausalForestDML` の生成（`cv_strategy`・`n_splits`・`gap`・`mc_iters` で cross-fitting）、学習、ATE・CATE の点推定と CI（`extra_alphas` で複数の信頼水準。列名は `cate_lower_95`・`cate_lower_99` など） |
 | `evaluation` | `baseline_estimates`, `compare_with_truth` | OLS のベースライン、真の CATE との比較（合成データ専用） |
 | `sensitivity` | `e_value_continuous`, `e_value_table`, `ovb_summary`, `ovb_grid`, `fit_dowhy_wrapper`, `default_refuters`, `run_refuters` | E-value、econml の omitted variable bias 感度分析（Chernozhukov et al. 2022）、DoWhy の反証テスト |
 | `plots` | `plot_*` | 図（`Figure` を返すだけで、保存・表示はしない）。`plot_cv_folds` で分割の形を確認できる。`plot_cate_by_feature` は点推定と複数の信頼水準の CI（既定 95%・99%。狭い CI ほど濃い帯）を、既定で1行に2つずつ描く |
+| `partial_r2` | `residualize`, `fit_residual_regression`, `sensitivity_statistics`, `robustness_value`, `benchmark_partial_r2`, `benchmark_table`, `partial_r2_grid`, `linear_partial_r2` | 部分決定係数による感度分析（Cinelli & Hazlett 2020。R の sensemakr と同じ式）。残差回帰の推定値の RV_q・RV_q,α、観測された共変量による benchmark、調整後の推定値・CI の格子 |
 | `scaling` | `check_scale`, `rescale_columns` | Y を定数倍して推定したときに、結果を元の単位に戻す |
 | `output` | `OutputSaver` | 図を `outputs/figures/<分析名>/<実行ID>/`、表を `outputs/tables/<分析名>/<実行ID>/` に保存 |
 
@@ -52,11 +53,44 @@ DAG の作成と estimand の同定が済んでいる前提で、econml の Doub
 |---|---|---|
 | E-value | 効果を打ち消すのに必要な未観測交絡の強さ（リスク比）。連続の Y は RR ≈ exp(0.91·効果/SD(Y)) で近似 | 自前（DoWhy の E-value は線形回帰・GLM の推定器専用のため） |
 | omitted variable bias | 未観測交絡が Y・T の残差の分散を c_y・c_t だけ説明するときの ATE の範囲と robustness value | econml の `sensitivity_interval`・`robustness_value` |
+| 部分決定係数 | 未観測交絡が処置・結果の残差を説明する割合（R²_{T~Z\|X}・R²_{Y~Z\|T,X}）ごとの調整後の推定値・CI、RV_q・RV_q,α、「観測された共変量 X_j の k 倍の強さ」の交絡での推定値（benchmark） | 自前（`partial_r2`。sensemakr の式を DML の残差回帰に適用） |
 | 反証テスト | 偽の処置・偽の結果・無関係な共変量・部分標本・模擬的な未観測交絡で推定し直したときの振る舞い | DoWhy（econml の `est.dowhy` 経由） |
 
 DoWhy の `add_unobserved_common_cause` の `non-parametric-partial-R2` は、econml の推定器と組み合わせると
 特徴量の数が合わずに失敗する（DoWhy 0.12）ため使っていません。同じ考え方の分析は econml の
 omitted variable bias 感度分析で行います。
+
+## 部分決定係数による感度分析（`partial_r2`）
+
+DML の残差どうしの回帰 Ỹ = θ·T̃ + e（Ỹ = Y − E[Y|X,W]、T̃ = T − E[T|X,W]。cross-fitting の残差）は、
+観測された共変量を取り除いた後の単回帰です。そのため、OLS 向けの Cinelli & Hazlett（2020）の式を
+そのまま使えます（部分線形モデルで同じ偏りの式が成り立つことは Chernozhukov et al. 2022 が示しています）。
+
+```python
+from causal_inference.partial_r2 import (
+    benchmark_partial_r2, benchmark_table, fit_residual_regression, partial_r2_grid,
+    residualize, sensitivity_statistics,
+)
+
+residuals = residualize(y, t, controls, model_y=model_y, model_t=model_t, cv=cv)
+fit = fit_residual_regression(residuals)              # θ̂・標準誤差・自由度
+stats = sensitivity_statistics(fit, q=1.0, alpha=0.05) # R²_{Y~T|X}・RV_q・RV_q,α
+bench = benchmark_partial_r2(y, t, controls, {"X1": ["X1"]}, model_y=model_y,
+                             model_t=model_t, cv=cv, full_residuals=residuals)
+table = benchmark_table(fit, bench, multipliers=(1, 2, 3))   # k×X1 の交絡で調整した推定値・CI
+grid = partial_r2_grid(fit, np.linspace(0, 0.4, 41))         # plots.plot_partial_r2_contours に渡す
+```
+
+- benchmark の部分決定係数は、X_j を除いて nuisance を cross-fitting し直したときの残差の分散の増え方から
+  求めます（R²_{T~X_j|X_−j} = 1 − Var(T̃)/Var(T̃_−j)、R²_{Y~X_j|T,X_−j} も残差回帰の残差で同様）。
+  benchmark の式は線形モデルで導かれたもので、非線形の nuisance では目安です。
+- 対象は残差回帰の推定値（処置の残差の分散で重み付けした平均的な効果）です。因果フォレストの ATE
+  （CATE の平均）とは少し違います。econml の `ovb_summary` の c_y・c_t も部分決定係数で、こちらは
+  因果フォレストの ATE が対象です。
+- 自由度は n − 1、標準誤差は古典的な OLS の式です（sensemakr の式と整合させるため）。
+- 単位: `ResidualRegression.rescaled(factor)` で効果の単位を換算します（Y の定数倍を戻す `1/c`、
+  T0→T1 の効果にする `T1 − T0`）。部分決定係数・RV は単位によらず、変わりません。
+- 式は R の sensemakr の Darfur の例と照合しています（`tests/test_partial_r2.py`）。
 
 ## 処置の基準値・目標値（T0 → T1）
 

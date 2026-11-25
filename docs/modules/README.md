@@ -10,7 +10,7 @@
 | `feature_engineering` | pandas DataFrame を受け取る sklearn 互換の特徴量 transformer | [feature_engineering.md](feature_engineering.md) |
 | `modeling` | 実験の実行基盤（設定・CV・モデル・再帰予測・チューニング・SHAP・アンサンブル・実験ログ） | [modeling.md](modeling.md) |
 | `evaluation` | 誤差評価の可視化（残差・時系列の残差診断・分類・学習曲線・影響度・SHAPの相関） | [evaluation.md](evaluation.md) |
-| `causal_inference` | econml の DML による CATE 推定と感度分析（E-value・omitted variable bias・DoWhy の反証テスト） | [causal_inference.md](causal_inference.md) |
+| `causal_inference` | econml の DML による CATE 推定と感度分析（E-value・omitted variable bias・部分決定係数・DoWhy の反証テスト） | [causal_inference.md](causal_inference.md) |
 
 ## 依存関係
 

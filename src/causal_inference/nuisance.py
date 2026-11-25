@@ -250,6 +250,37 @@ def cross_validated_mse(
     return float(np.mean(scores))
 
 
+def cross_fit_predict(
+    model: BaseEstimator,
+    features: np.ndarray,
+    target: np.ndarray,
+    cv: Splitter,
+) -> np.ndarray:
+    """cross-fitting の out-of-fold の予測を返す（各行は、その行を学習に使っていないモデルで予測）。
+
+    Args:
+        model: 未学習のモデル（fold ごとに clone して使う）。
+        features: 特徴量。
+        target: 目的変数。
+        cv: 分割器（検証側の行が全行をちょうど1回ずつ覆うもの。K-fold・`BlockedTimeSeriesSplit`）。
+
+    Returns:
+        行ごとの予測（`target` と同じ長さ）。
+
+    Raises:
+        ValueError: 検証側に一度も入らない行がある場合。
+    """
+    features = np.asarray(features, dtype=float)
+    target = np.asarray(target, dtype=float)
+    prediction = np.full(len(target), np.nan)
+    for train_idx, valid_idx in cv.split(features):
+        fitted = clone(model).fit(features[train_idx], target[train_idx])
+        prediction[valid_idx] = fitted.predict(features[valid_idx])
+    if np.isnan(prediction).any():
+        raise ValueError("検証側に一度も入らない行があります（分割器が全行を覆っていません）")
+    return prediction
+
+
 def _suggest(trial: optuna.Trial, search_space: SearchSpace | None) -> dict[str, Any]:
     """探索空間から1試行分のパラメータをサンプリングする。"""
     if search_space is None:
